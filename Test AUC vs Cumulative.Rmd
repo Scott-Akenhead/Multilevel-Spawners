@@ -1,0 +1,51 @@
+---
+title: "test AUC vs Cumulative"
+author: "Scott A. Akenhead"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Concept
+
+AUC is area under a trapezoid of linearly interpolated observations of spawner abundance with time. This seems the same as cumulative abundance with linear interpolation. Let's see.
+
+define AUC
+
+```{r}
+#| label: def_AUC
+AUC = function(x,y){ # trapezoid as rectangles
+    w = diff(x)
+    a= 0.5*( c(w[1], w)+c(w,w[length(w)]) ) 
+    b = sum(a*y)
+    return(b)
+}
+```
+
+```{r}
+#| label: test1
+day = c(3,6,8,11,14,15,18,20)
+truth = 1000* dnorm(day, 13, 3) 
+truth_accum = cumsum(truth)
+obs = truth* rnorm(truth,1.0,0.2) # 20% error.
+obs_accum= cumsum(obs)
+samples = data.frame (Day=day,Truth=truth, Observed=obs)
+plot_dat = data.frame (
+    Day= rep(day,2), 
+    Count= c(truth, obs), 
+    Count_Accum = c(truth_accum, obs_accum), 
+    Origin=rep( c("Truth","Obs"), each= length(day) )
+)
+ggplot(plot_dat, aes(Day,Count, colour=Origin))+ theme_bw() +
+    geom_line()+ geom_point() 
+
+ggplot(plot_dat, aes(Day,Count_Accum, colour=Origin))+ theme_bw() +
+    geom_line()+ geom_point() 
+
+est_AUC_truth = AUC(day, truth)
+est_AUC_obs = AUC(day, obs)
+cat(' est_AUC_truth:', est_AUC_truth, 'est_AUC_samples:', est_AUC_samples, '\n')
+```

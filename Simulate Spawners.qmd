@@ -1,0 +1,310 @@
+---
+title: "Simulate Spawners"
+author: "Scott A. Akenhead"
+date: today
+format:
+  pdf: default
+editor: visual
+---
+
+```{r}
+#| label: setup
+#| echo: false
+library (magrittr);library(ggplot2); library(knitr);
+```
+
+# Concept
+
+Spawner abundance has two main components:
+
+1.  Salmon population dynamics, starting with abundance of **juveniles** from abundance of **spawners**, then the age composition of **adult returns** from those spawners, but adult returns are modified by varying survival. It is not clear whether data for spawner ages will improve spawner abundance estimates.
+
+    a.  Survival (smolts to adult returns, **SAR**) is a life-long accumulation of mortality risk: high risk for a short time early, such as saltwater acclimation, and coastal predators on small salmon (exacerbated by starvation forcing high-risk foraging during first winter), then low risk for a long time from predators on large salmon: marine mammals, salmon sharks, humans,.
+    b.  Survival of spawners from freshwater entry to actual spawning, prespawning mortality, can be low. High river temperatures due to **anthropic sudden global warming** are ominous threat to salmon populations near southern range limits, including populations in the Columbia watershed and California.
+
+2.  Behaviour of spawners, specifically timing of immigration to freshwater from saltwater, then timing of spawning per se after some time in holding pools.
+
+    a.  There is a probability density distribution of the day of entry to spawning grounds from holding pools (**PDD arrival**) is probably affected by flow event and possibly river temperature.
+    b.  Duration of **residence** on the spawning grounds is best described for females: digging redds, selecting mates and spawning (repeated: big females select multiple mates), and guarding redds after spawning.
+    c.  Females typically die while guarding a redd, males typically drift away to die in holding ponds (where *for sure* they swap lies about their sexual prowess). This might involve residence varying between males and females.
+
+From these ideas, a conceptual model, we wish a quantitative model. The parameters could be those of the following table.\
+
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| Parameter Description                                                                                                                                                                                                                                                                                                                                                    | Variable, Symbol                             |
++==========================================================================================================================================================================================================================================================================================================================================================================+==============================================+
+| **Abundance**. True number of spawners each year. Multiple ages lumped. N for number                                                                                                                                                                                                                                                                                     | A\[year\], $A_y$                             |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **SAR**. Juvenile to Adult survival of salmon that enter the ocean. Applied according to ocean entry year of salmon, irrespective of freshwater age and duration of marine life. M for marine mortality.                                                                                                                                                                 | mort\[year\], $M_y$                          |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Density.** The number of salmon on the spawning ground, available to be observed. Derived from the temporal pattern of salmon entering, the timing of that pattern, then residence time before leaving (death or emigration), and the abundance of spawners each year.                                                                                                 | density\[year,day\], $D_{y,d}$               |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Entry**. The temporal pattern of spawners entering the spawning ground. Typically Gaussian, $G(\mu_{E,y}, \sigma_E)$, with the mean day, the interannual timing, varying by year but the spread constant across years. So $T_y=\mu_{E,y} =G(\mu_T, \sigma_T)$ where $\mu_T$ is the mean day across years of the mean day of spawner entry. $E_{y,d}=G(T_y, \sigma_E)$. | entry\[year,day\], $E_{y,d}$\                |
+|                                                                                                                                                                                                                                                                                                                                                                          | mu_entry, $\mu_E$\                           |
+|                                                                                                                                                                                                                                                                                                                                                                          | sigma_entry, $\sigma_E$                      |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Timing**. The variability of mean spawning day across years.                                                                                                                                                                                                                                                                                                           | timing \[year\], $T_{y}$ mu_timing, $\mu_T$\ |
+|                                                                                                                                                                                                                                                                                                                                                                          | sigma_timing, $\sigma_T$                     |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Residence**. Duration, in days, of a spawner on the spawning ground (observation place). Initially constant across years, but may vary by fish age and/or size, and by habitat conditions.                                                                                                                                                                             | residence, $R$                               |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Day.** Day of the solar year. Day\[0\]=Day\[365\] is winter solstice, Medieval (Gregorian): December 21. January 1 is Day\[10\].\                                                                                                                                                                                                                                      | day, $d$                                     |
+| Spring equinox: Day\[90\], Summer solstice: Day\[181\], Fall equinox: Day\[275\].\                                                                                                                                                                                                                                                                                       |                                              |
+| <https://www.timeanddate.com/calendar/seasons.html>\                                                                                                                                                                                                                                                                                                                     |                                              |
+| first_day = 0 31 59 90 120 151 181 212 243 273 304 334\                                                                                                                                                                                                                                                                                                                  |                                              |
+| June 20 = first_day\[6\]+ 20 +10 = 181\                                                                                                                                                                                                                                                                                                                                  |                                              |
+| Earth's orbit of Sol is an ellipse, spring to fall is longer than fall to spring. Equinoxes and solstices are not 365.25/4 days apart, not solar days 91.3125, 182.6250, 273.9375                                                                                                                                                                                        |                                              |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Observation**. The days, each year, when humans count spawners. Initially, a pattern starting on the same day every year and repeating as Monday, Wednesday, Friday for a month (14 obs) or Monday, Thursday (10 obs). Thus if start day is Fall equinox + 10 days, then\                                                                                              | obs\[day, year\], $O_{d,y}$                  |
+| 285+ c(0,2,4,7,9,11,14,16,18,21,23,25,28,30) =\                                                                                                                                                                                                                                                                                                                          |                                              |
+| 285 287 289 292 294 296 299 301 303 306 308 310 313 315\                                                                                                                                                                                                                                                                                                                 |                                              |
+| or 285+ c(0,3,7,10,14,17,21,24,28,31) =\                                                                                                                                                                                                                                                                                                                                 |                                              |
+| 285 288 292 295 299 302 306 309 313 316.\                                                                                                                                                                                                                                                                                                                                |                                              |
+| It might be interesting to know the minimum observations for reliable results.                                                                                                                                                                                                                                                                                           |                                              |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Sampling Error**. The precision of an observation is probably a log-normal distribution: results are non-negative, absolute error is proportional to spawner abundance (multiplicative, error is a percent). Then an observation of an abundance is $O_{y,d}=rlnorm(log(A_{y,d}), \sigma_O)$ where $\sigma_O\approx 0.25$.\                                            | sigma_obs, $\sigma_O$                        |
+| qlnorm(c(0.025,0.25,0.75,0.975),log(1e4), 0.25) \# 95% and 50%\                                                                                                                                                                                                                                                                                                          |                                              |
+| 6,126 8,448 11,836 16,323 \# 95% and 50% around true                                                                                                                                                                                                                                                                                                                     |                                              |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Productivity**. The ratio of juveniles to spawners, on the order of 70. The juveniles become returning adults after 1 or 2 years freshwater, and 1 to 3 years saltwater.                                                                                                                                                                                               | prod, $P$                                    |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Productivity Variability**. Adds a lognormal random component to productivity.                                                                                                                                                                                                                                                                                         | prod_var, $\sigma_P$                         |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+| **Life History.** Apportions age at return (fresh then salt). Organized as (1) probabilities for smolts being 1 or 2 lake years (1.x, 2.x) so a fraction return later and encounter different SAR, then (2) 1, 2, or 3 marine years. An effect on SAR for age 2.x is not considered. Example:\                                                                           | hist_fresh, $h_f$\                           |
+| H=c(1.1,1.2,1.3, 2.1,2.2,2.3) = c(0.8\*c(0.2,0.6,0.2), 0.2\*c(0.2,0.6,0.2))\                                                                                                                                                                                                                                                                                             | hist_salt, $h_s$                             |
+| 1 0.6 0.48 0.16 0.04 0.12 0.04, sum is 1.                                                                                                                                                                                                                                                                                                                                |                                              |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+|                                                                                                                                                                                                                                                                                                                                                                          |                                              |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------+
+
+: Table 1. Parameters for simulated observations of spawner abundance.
+
+## Set parameters
+
+Starting with four years of spawner abundance, subsequent abundances are derived from juveniles per spawner (plus variability), life history, and SAR. The initial years might be random lognormal: rlnorm(4, log(1e4), 1).
+
+```{r}
+#| label: constants
+n_years = 20
+# juveniles per spawner, inverse of mean mortality.
+prod=12.5 
+# SAR uniform random,  1% to 15% survival
+mort_min = 0.01; mort_max = 0.15  
+# juveniles per spawner, inverse of mean mortality.
+prod=12.5 
+# to initialize A, mean and lognormal stdev, 
+A_start_mu = 1e4; A_start_sigma = 1;  # mean and lognormal stdev, to initialize A.
+# life history proportions. Constant to start with. No effect of ocean entry age.
+hist_fresh = 0.8 # frac 1.x, so frac 2.x = (1-history_fresh)
+hist_salt = c(0.2,0.6,0.2) # frac 1.1, 1.2, 1.3 of hist_fresh or hist_salt
+# mean day of spawners entering spawning grounds over all years
+mu_timing = 300  
+# stdev of timing for each year
+sigma_timing = 5
+# spread in time spawners entering. constant. 95% within 4 sigma_entry  
+sigma_entry = 7 
+# residence time on spawning ground
+residence = 7
+
+cat("\n Constants", "\n n_years:", n_years, "  prod:", prod, 
+    " \n mort_min:", mort_min, "  mort_max:", mort_max,
+    "\n A_start_mu:",A_start_mu,  " A_start_sigma:",A_start_sigma,
+    "\n hist_fresh:",hist_fresh, "  hist_salt:",hist_salt,
+    "\n mu_timing:",mu_timing,  "  sigma_timing:", sigma_timing,
+    "\n sigma_entry:",sigma_entry, 'residence:', residence,'\n')
+
+# apply constants to 
+mort = runif(n_years,mort_min,mort_max ) # SAR
+timing= rnorm(n_years, mu_timing, sigma_timing) %>% round(0)
+# spawning distribution. fixed all years.
+# day range is 99.9% range (3 sigma) for timing plus 99.9%  rangefor entry
+day_min = (mu_timing - 3*sigma_timing) - 3*sigma_entry
+day_max = (mu_timing + 3*sigma_timing) +  3*sigma_entry
+n_days = 1+day_max-day_min
+# starting abundance of spawners
+A = numeric(n_years)
+A[1:4] = rlnorm(4, log(A_start_mu), A_start_sigma) %>% round(0) # start for sim
+cat("\n Patterns from constants", 
+    '\n day_min:', day_min, '  day_max:', day_max, '  n_days:',n_days, 
+    '\n mort: \n', round(mort,3),
+    '\n timing: \n', timing, 
+    '\n A: \n', A, '\n') 
+```
+
+Use these constants to simulate population dynamics and generate spawner abundance each year. A spawner in year 0 produces adult returns age 1.1 in year 3, ages 1.2 and 2.1 in year 4, age 2.3 in year 5. Freshwater age 1.x experiences mortality (SAR) according to ocean entry only, year 2. Age 2.x enters the ocean in year 3. Marine mortality after ocean entry year is deferred, simplistic but a starting point. Fishing mortality and prespawning mortality (during spawners freshwater migration and holding) deferred. Yes, fine, bears, no problem, but later. The known (simulated) age composition of spawners is not retained.
+
+```{r}
+#| label: pop_dyn
+# a function to generate spawner abund each year.
+Pop_dyn = function(spawners, hist_fresh, hist_salt, prod, mort){
+# A is population abundance. NA after year 4. 
+# this function calcs returns from spawners for an additional 3 years. 
+    # if 20 years of spawners, year 17 is last addition to year via returns age 1.1 
+    # but year 17 calculations produce returns age 2.3 for year 23. 
+# truncate before return    
+    n_years= length(spawners)
+    A = numeric(n_years+3) 
+# transfer starting values for spawners
+    A[1:4]= spawners [1:4] 
+# A[4] is increased by returns 1.1 from spawners[1]
+# if n_year = 20, last spawners useful is year 17
+    for (y in 1:(n_years-3)) {  
+        juv=A[y]*prod 
+# apportion to freshwater duration, one or two years
+# assign mortality according to ocean entry year
+        age_1x = juv *    hist_fresh  * mort[y+2]
+        age_2x = juv * (1-hist_fresh) * mort[y+3]
+# apportion to saltwater duration, one, two, or three years
+    # age_11 = age_1x * hist_salt[1]
+    # age_12 = age_1x * hist_salt[2]
+    # age_13 = age_1x * hist_salt[3]
+    # age_21 = age_2x * hist_salt[1]
+    # age_22 = age_2x * hist_salt[2]
+    # age_23 = age_2x * hist_salt[3]
+        A[y+3] %<>% + (age_1x * hist_salt[1])  # age_11  
+        A[y+4] %<>% + (age_1x * hist_salt[2] + age_2x * hist_salt[1])  # 1.2 + 2.1
+        A[y+5] %<>% + (age_1x * hist_salt[3] + age_2x * hist_salt[2])  # 1.3 + 2.2
+        A[y+6] %<>% + (age_2x * hist_salt[3])  # age_23
+    }
+    return(A[1:n_years]) # truncated
+}
+```
+
+## Test Pop_dyn
+
+```{r}
+#| label: test_pop_dyn
+A1 = Pop_dyn(A, hist_fresh, hist_salt, prod, mort)
+plot_dat= data.frame(Year=1:n_years, Spawners = A1)
+ggplot(data=plot_dat, aes(Year, Spawners)) + theme_bw()+
+    coord_cartesian(xlim=c(0,20), ylim=c(0,25000), expand=FALSE) +
+    geom_line() + geom_point()
+
+```
+
+## Simulate spawner observations
+
+Spawner abundance each year is converted to spawner entry to spawning grounds as a cumulative normal distribution. This shape is fixed for all years but earlier or later in each year according to timing. You might notice that the summed density (at this stage) is the same for every year, it is the residence time.\
+
+```{r}
+#| label: entry
+# solar days across all spawning all years.
+days = day_min:day_max  
+# result will be a matrix of spawner density rows years, cols are days
+density = matrix(nrow=n_years, ncol=n_days)
+for (year in 1:n_years){
+# mean entry day this year is timing[year]
+    density[year, ] = pnorm(days, timing[year], sigma_timing) 
+    density[year,(residence+1):n_days]  = density[year,(residence+1):n_days] -
+        density[year, 1:(n_days-residence) ] 
+}
+density[ density < 1e-6] = 0
+```
+
+## Plot spawner timing by year
+
+Examine the normal distributions of spawner timing by years. This is the pattern without annual abundance of spawners.
+
+```{r}
+#| label: spawner_timing
+plot_dat = data.frame(              # n_days*n_years = rows
+    Year = rep(2001:2020, each=n_days),
+    Day = rep(day_min:day_max, times=n_years),
+    Pattern = density %>% t %>% as.vector,  # t is transpose. '*'() is multiply_by
+    Density = density %>% '*'(A1) %>% t %>% as.vector  # A is spawner abundance
+)
+ggplot(plot_dat, aes(Day, Pattern)) + theme_bw() +
+    geom_line() + 
+    facet_wrap(Year~.) 
+
+ggplot(plot_dat, aes(Day, Density)) + theme_bw() +
+    geom_line() + 
+    facet_wrap(Year~.) 
+```
+
+## Generate observations
+
+Determine density at the sheduled sampling days. It will be illustrative should sampling start too late or end too early, in years when spawning is unusually early or late.
+
+```{r}
+#| label: gen_obs
+start_sampling = 285  # about 2 weeks before average mean entry? 
+# sampling Monday (start) and Thursday, 5 weeks, 11 obs. affordable? 
+sampl_sched= c(3,4) %>% rep(5) %>% cumsum %>% c(0,.)  # 0,3,7,10,14,17,.
+obs_days = start_sampling + sampl_sched
+cat('obs_days:', obs_days, '\n')
+   #  285 288 292 295 299 302 306 309 313 316 320. 
+# first simulated spawner density is column obs is start_sampling-day_min
+obs_sim= (start_sampling-day_min)+ sampl_sched
+cat('obs_sim:', obs_sim, '\n')
+# select obs_sim columns from density * abundance
+obs_true = density %>% '*'(A1) %>% '['(,obs_sim) # '['(,x) is extract, like a[,x]
+rownames(obs_true) <- 2001:2020; colnames(obs_true) <-obs_days;
+kable(obs_true, digits=0)
+ 
+```
+
+## Sampling error
+
+Using random samples from a lognormal distribution around the true density on an observation day, rlnorm(1, log(100), 0.2), resulted in the same error distribution as multiplicative random normal, rnorm(x, x, 0.2). Consider this example, with sampling accuracy 20%. Field protocol is one sample per day (?). Re-run this chunk several times to see variability of variability (large).
+
+```{r}
+#| label: sample_example
+x=100;  # true abundance
+sampl_err = 0.2 #percent
+n_samples=50
+half_n = floor(n_samples/2)
+bln = rlnorm(n_samples, log(x),sampl_err) %>% sort  # lognormal samples
+b = x * rnorm(n_samples,1,     sampl_err) %>% sort  # percent error samples
+cat(' min, med, max:\n lognormal error:', round(bln[c(1, half_n, n_samples)],1),
+    '\n percent   error:', round(b[c(1,half_n,n_samples)],1),'\n') 
+plot(I(1:n_samples) ~ b, pch=20, type='o',xlim=c(0,x*2),
+     main = "Sampling Error Cumulative Distribution", sub='lognormal is blue',
+     xlab = 'Cumulative Frequency',
+     ylab = 'Sampling Result (count)')
+abline(v=x, h=half_n)
+lines(I(1:n_samples) ~ bln, col='blue') 
+points(I(1:n_samples) ~ bln, col='blue')
+
+```
+
+## Samples
+
+A dataset for an analysis that will estimate (recover) the true spawner abundance. The plot of samples versus true will show increased scatter at high density of spawners, reflecting percent accuracy rather than absolute accuracy.
+
+```{r}
+#| label: samples
+#| warning: false
+sigma_obs = 0.20
+obs_sampl = obs_true *rnorm(obs_true,1,sampl_err) %>% 
+    matrix(ncol= length(sampl_sched), nrow= n_years)
+rownames(obs_sampl) <- 2001:2020; colnames(obs_sampl) <-obs_days;
+kable(obs_sampl, digits=0)
+plot_dat = data.frame (True = as.vector (obs_true), Sample =as.vector (obs_sampl))
+ggplot(plot_dat,aes(True, Sample)) + theme_bw() +
+    geom_point() + geom_abline(slope=1, intercept = 0)
+ggplot(plot_dat,aes(True, Sample)) + theme_bw() +
+    scale_x_log10() +   scale_y_log10() +
+    geom_point() + geom_abline(slope=1, intercept = 0)
+# time series of sample for each year
+# obs_days is days sampled from density, same days each year
+plot_dat = data.frame(
+    Year = rep(2000+c(1:n_years), each=dim(obs_sampl)[2]),
+    Day = rep(obs_days, times=n_years),
+    Samples = obs_sampl %>% t %>% as.vector ) 
+ggplot(plot_dat, aes(Day, Samples)) + theme_bw() +
+    geom_line(linewidth=0.25) + geom_point(size=0.75) +  # size is millimetres?
+    facet_wrap(Year~.) 
+
+```
+
+## Save this simulation
+
+Just truth and sampled, ignoring underlying parameter values.
+
+```{r}
+#| label: stash_em
+#| eval: false
+saveRDS( obs_sampl, './results/obs_sampl.Rdata')
+saveRDS( obs_true, './results/obs_true.Rdata')
+```

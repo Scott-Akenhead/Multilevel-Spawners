@@ -1,0 +1,804 @@
+# Multilevel Regression for Sockeye Salmon Spawner Abundance Across Years and Rivers
+
+## Introduction
+
+***Let the data speak for itself... but all the data must speak.*** - John P. Cunningham (2012)
+
+Estimates of the number of sockeye salmon spawners that occupy in a river (or similar geographic category of spawning) involve repeated surveys during, typically, September to November. Techniques vary: counting spawners while walking beside a river, while in a helicopter or small airplane, while snorkeling down the river, and from analyzing video from drones. There are many other methods to estimate abundance: mark-recapture, conductivity sensors, counting fences, and eDNA. Other salmon species may be counted in a survey for sockeye, and each salmon species has a diversity of enumeration methods.
+
+The analysis of repeated surveys of sockeye spawners is conventionally an area under the curve estimate (AUC) where the "curve" is sometimes just the area under straight lines joining the observations. The data may be supplemented with prior knowledge or subjective judgements about first, peak, and last presence of spawners. One improvement assumes a Gaussian ($\\mathcal{N},$normal) distribution for the temporal pattern of abundance, fitted to a time series survey estimates. These analyses are confined to the samples for one river in one year, so parameter estimates are based on few data, < 10, and abundance estimates are accordingly imprecise.
+
+The intention of this exercise is to show, using simulated data, that AUC estimates can be improved by considering multiple rivers and multiple years in a multi-level regression. The ideas are:
+
+* there will be an effect in common due to years on the temporal pattern of abundance in a group of river. Marine migration might be early or late, rainfall to raise water levels sufficiently for salmon to enter the rivers may be early or late.
+* a river can have a consistently different temporal pattern from other river. Spawners that home to that river can arrive earlier or later, and more or less spread in time.
+* a river can have consistently more or fewer salmon compared to other rivers. Factors such as length of accessible river and the abundance of gravel suitable for spawning (for redds) affect salmon abundance.; and
+* the abundance of spawners across all rivers varies by year. Implicit is that these spawning groups in rivers (salmon tribes?) are related within a population or conservation unit (metapopulation).
+
+These ideas can be assembled into an equation
+
+$$
+N_{tjk} = N_j P_k (T_0[\mu,\sigma]_t + T_j[\mu,\sigma]_t + T_k[\mu,\sigma]_t) + \epsilon_{tjk}
+$$
+
+where $N\_{tjk}$is the number of spawners on day *i* in river *k* in year* j*. That is estimated with error $\\epsilon$ from the proportion$P\_k$of all spawners that year$N\_j$ which enter river *k* according to the background temporal pattern $T\_0$and how that pattern is affected by the pattern for that year $T\_j$ and that river $T\_k.$ The expression $T\_x\[\\mu,\\sigma\]\_t$refers to a temporal distribution with parameters $\\mu\_x$ and$\\sigma\_x$for timing and spread (if the normal distribution is chosen).
+
+The normal distribution might be a sufficient description for the temporal abundance of spawners despite being symmetrical and unbounded. Reality might be better described as a truncated and skewed Gaussian distribution, or by a distribution that is inherently bounded. The beta distribution, for example has the advantage that, after determining bounds such as the first and last important abundance of spawners in all rivers (in the region being analyzed) then river effect and year effect might be sufficiently described by a single parameter, the day of peak abundance (mode), that determines the shape of the beta distribution between those bounds (the skew).
+
+```r id=278d4e06-0040-4639-be6b-56815721e768
+# Local Functions 
+
+# add dimension names to an array. There has to be a better way.
+ArrayDimNames <- function (a, names){
+    # a is an array
+    # names with length(dim(a)), one name for each dimension
+    dims=dim(a); ndims=length(dims);
+    if (length(dims) > 4) stop("ArrayDimNames: only defined for 3 or 4 dimensions");
+    result<- list(rep(names[1],dims[1]),rep(names[2],dims[2]),
+                  rep(names[3],dims[3]) )
+    if((length(dims) == 4)){
+        result<- list(rep(names[1],dims[1]),rep(names[2],dims[2]),
+                      rep(names[3],dims[3]),rep(names[4],dims[4]) )
+    }
+    return(result)
+}
+# example:
+# ArrayDimNames(a=array(dim=c(3,3,3)), names=c("dog","fox","bat"))
+    # [[1]] [1] "dog" "dog" "dog"
+    # [[2]] [1] "fox" "fox" "fox"
+    # [[3]] [1] "bat" "bat" "bat"
+
+# day of the year if not leap year
+doy=cumsum(c(0,31,28,31,30,31,30,31,31,30,31,30,31)); 
+   # 0 31  59  90 120 151 181 212 243 273 304 334 364
+   # used as doy(month) where month is 1:12. 
+
+# truncated Normal distribution (tails trimmed). This begs to be recursive.
+RtruncNorm <- function(n=1,m=0,s=1,t=2){
+		# t is truncation, how many sd tolerable? default is 2
+    a <- rnorm(n);  print(a);
+    r <- max(abs(a)); print(r)
+    while(r > t){
+        j <- a > t; print(j) # where exceeds
+        a[j] <- rnorm(sum(j)) # try again where exceeds
+        r <- max(abs(a)) # OK yet?
+    }
+    result <- a*s+m
+    return(result)
+}
+```
+
+## 
+* Examples of Samples
+
+### Temporal patterns from year and river effects.
+
+Simulate data applies the normal distribution for the overall abundance of spawners with timing (mean,$\\mu$) centered on day 273, the end of September, and a spread (sd,$\\sigma$) of 7 days. The year effect on the timing (mean) for spawner abundance in one river is drawn from a random normal distribution with sd = 5 days and mean = 0. The year effect on the spread (sd) of the spawner abundance in a river is similar, random normal with sd = 1.5 days and mean = 0. The river effects are the same, random normal with timing sd = 5 days and spread sd = 1.5 days.
+
+The following code creates a three dimensional array of *nday* observations in each of *nriver* rivers in each of *nyears* years.
+
+```r id=e9f251a2-13d0-4149-899f-d65cd08277ad
+# mean and SD of salmon abundance after removing year
+# and river effects. Day 270 is September 30 (not leap year)
+background <- c(273, 7)  
+# storage for simulated data
+nday <- nriver <- nyear <- 5;  # remember: arrays stored by first index
+trueAbundance <- array(dim=c(nday, nriver, nyear));
+dimnames(trueAbundance) <-list(day=1:nday,river=LETTERS[1:nriver],
+                               year=1991:(1991+nday-1))
+# river size effect:proportion across all years, of spawners in that river 
+river_size <- runif(nriver,1,10);   # random uniform.
+river_size=river_size/sum(river_size); # proportion
+# temporal effects effects
+yearSD <- c(5,1.5) # effect on timing and spread
+riverSD <- c(5,1.5) 
+yearEffect <-   cbind(rnorm(nyear,   0, yearSD[1]),
+                      rnorm(nyear,   0, yearSD[2]) ) # 2 columns
+riverEffect <- cbind(rnorm(nriver, 0, riverSD[1]),
+                      rnorm(nriver, 0, riverSD[2]), river_size) # 3 columns
+dimnames(yearEffect) <-   list(year=1991:(1990+nday),
+                            effect=c("timing", "spread"));
+dimnames(riverEffect) <- list(river=LETTERS[1:nriver], 
+                            effect=c("timing", "spread", "size"));
+cat(  ' Year Effect   \n'); print(yearEffect);
+cat('\n River Effect \n'); print(riverEffect);
+```
+
+### Examine total effect.
+
+The random, additive effects of rivers (A, B, C,) and year (1991, 1992,) are calculated for timing and spread.
+
+```r id=c958a86f-c6c3-4079-885a-f9881e2d6006
+b1  <- matrix(nrow=nriver, ncol=nyear);
+dimnames(b1) <- list(river=LETTERS[1:nriver], year=1991:(1990+nday) )
+b4 <- b3 <- b2 <- b1
+cat("riverEffect+yearEffect. Timing (mean) \n")
+for(year in 1:nyear){
+  for(river in 1:nriver){
+    b1[river, year]=riverEffect[river,1]+yearEffect[year,1]; 
+  }
+}
+print(b1)
+cat("\n riverEffect+yearEffect. Spread (SD) \n")
+for(river in 1:nriver){
+  for(year in 1:nyear){
+    b2[river, year]=riverEffect[river,2]+yearEffect[year,2];
+  }
+}
+print(b2)
+# earliest and last abundance across all rivers and years
+# needed to determine sampling days
+b3 <- b1 - 1.5*(b2+background[2]); # first case revealed
+cat("\n Early due to river and year effects \n");
+print(b3);
+b4 <- b1 + 1.5*(b2+background[2]); # last  case revealed
+cat("\n Late due to river and year effects \n");
+print(b4)
+```
+
+### Generate sampling days 
+
+As a starting point, sampling days are the same for every river every year. The range of sampling days has to cover the range of days when salmon are abundant in any river. That is determined from -1 sd of abundance distribution for the most early case of river and year, and +1 sd for most delayed case.
+
+```r id=66cabbcc-464f-4abe-a8c6-1cd43c43c73e
+# sampling days. Cover expected range across all years and rivers.
+j <- which.min(b3); # earliest case
+a1 <- b3[j]+background[1];  # value for this case
+cat('earliest case',a1, 'timing effect', b1[j],'spread effect', b2[j],'\n')
+j <- which.max(b4);  # most delayed case
+a2 <- b4[j]+background[1];
+cat('last case',a2,'timing effect', b1[j], 'spread effect', b2[j], '\n')
+days <- seq(a1, a2, length.out=nday);
+days <- floor(days) # integer days
+cat("\n Days of the year for observations:", days,"\n");
+```
+
+### Abundance by day
+
+The relative abundance of salmon in one river is taken as fixed and independent of years. This is true only when considering the potential abundance of spawners ("capacity" refers to some measure of output of salmon, not input of spawners). The spawning populations in a river may thrive or dwindle for many reasons: fishing, predators, disease,. These random effects within rivers across years will fall into the unexplained variance.
+
+```r id=61e61ef8-1df9-45c9-8c3c-9c6a4271793e
+# total abundance by year
+totalYearly <- rnorm(nyear, 1e5, 0.25e5) # abundance by year
+# abundance by day by river by year.
+for (river in 1:nriver) {
+    for (year in 1:nyear) {
+        trueAbundance [,river,year] <- totalYearly[year]*riverEffect[river,3]*
+        dnorm(days,
+            background[1]+riverEffect[river,1]+ yearEffect[year,1], # mean
+            background[2]+riverEffect[river,2]+ yearEffect[year,2]) # SD
+    }
+}
+j <- is.na(trueAbundance) | trueAbundance < 0.1 
+trueAbundance[j] <- 0
+
+par(tck=0.02, las=1, yaxs="i")
+color <- c("black","blue","green","orange","red"); 
+plot(1,1,type="n", xlim=c(-5,5)+range(days), ylim=c(.9,1.1)*range(trueAbundance),
+     xlab="Day of Year", ylab="Abundance"); axis(3,labels=F);axis(4,labels=F);
+for (river in 1:nriver) 
+    {for (year in 1:nyear) {
+        lines(days, trueAbundance[,river, year], col=color[river] )
+    }
+}
+abline(v=days, lty="dotted", col="grey50");
+```
+
+![__out-0](https://nextjournal.com/data/Qmek5Nzu12gTyhqg3kLjkjUy6YPtbCXg462HVYQ65UcG1v?content-type=image%2Fsvg%2Bxml&filename=__out-0)
+
+## Area under the curve, Conventional Fit
+
+To establish a contrast to AUC by river by year, we calculate the integral of total salmon abundance from the linear interpolation method and by fitting a normal distribution. Adjusting the linear interpolation by considerations such as a date for unobserved peak spawning is not included (yet).
+
+A spawning salmon may be observed in more than one survey, so a key parameter to translate AUC into salmon abundance is the duration of a spawner in a river. While that duration may be a haphazard estimate, it directly affects abundance estimates and needs to be included in these models. Potentially all of the spawners observed after peak abundance were also observed at peak abundance. This has led to simplifying the survey analyses to be maximum spawners observed. This value is included in the result because the relative abundance of spawners, from some uncalibrated index of abundance, such as maximum spawners observed across multiple surveys in one river and one year, may be sufficient for fisheries management.
+
+### Calculations without observation error
+
+Knowing how the precision of estimates of total changes with increasing observation error seems valuable. The baseline is zero observation error. The following code provides functions for exploring the effects of observation error, which I have not yet done. (perhaps Gaussian Process regression?)
+
+#### function for linear AUC
+
+```r id=28eb4008-2cc9-4c13-878e-0f116166d530
+# linear interpolation with irregular intervals.
+# each observation applies to half the preceding inteval and half the following.
+AUC <- function(days,dat) { # x,y. vectors
+  n=length(dat)
+  if (length(days) != n) stop("AUC: lengths differ");
+  interval <- days[-1] - days[-n]; # second minus first, etc. length n-1
+  weight <- interval/2 # n-1 of these
+  weight <- c(0,weight)+ c(weight,0); # for non-uniform intervals
+  auc <- sum (weight * dat)
+#  cat('weight', weight,'\n')
+  return(auc)
+}
+test_dat <- c(1,3,5, 2,1 ); # not symmetrical
+test_day <- c(2,5,8,11,14);
+AUC(test_day, test_dat ) # 12
+```
+
+#### function to fit normal distribution
+
+The log of a normal distribution is a parabola
+
+$$
+log(P_x)= log(\frac{1}{\sigma \sqrt{2\pi}})+ \frac{(x-\mu)^2}{2\sigma^2}
+$$
+
+$$
+log(y)= \frac{-1}{2}log(2\pi\sigma^2) + \frac{x^2 - 2 \mu x +\mu^2}{2\sigma^2}
+$$
+
+$$
+log(y)=  -0.5 \left( log(2\pi\sigma^2) + \frac{\mu^2} {\sigma^2} \right) -x \frac{2\mu}{2\sigma^2} + x^2 \frac{1}{2\sigma^2}
+$$
+
+$$
+log(y) = a + bx +cx^2
+$$
+
+where 
+
+$a=-.05 \\left( log(2\\pi\\sigma^2 ) +(\\mu / \\sigma)^2 \\right) ,$ $b= -0.5 \\mu / \\sigma^2,$ and $c= 0.5/\\sigma^2. $ 
+
+After linear regression of $y=a+bx+cx^2,$ the mean and standard deviation can be recovered as$\\mu= 0.5 \\ c/b$ and $\\sigma=\\sqrt{-0.5/c}.$
+
+The Gaussian integral (LaPlace 1782, Gauss 1809) is the *area under the curve* of a normal distribution with $\\mu=0$ and $\\sigma^2=1/2.$ 
+
+$$
+\int_{-\inf}^{\inf}e^{-x^2}dx=\sqrt{\pi}
+$$
+
+There is an extension applicable to the parabola obtained by regression with the log of abundance data. The antilog of the preceding fitted parabola (parameters $a, b,c$) is a normal distribution, and there is a analytic solution for the integral of the antilog of a parabola,
+
+$$
+\int_{-\inf}^{\inf}e^{a+bx-cx^2}dx= \sqrt{ \frac{\pi}{c}} \  e^{ \frac{b^2}{4c} +a}
+$$
+
+That integral is the total abundance, *aka* area under the curve, *aka* Gaussian scaling factor. See [link. ](https://en.wikipedia.org/wiki/Gaussian_integral) 
+
+Fitting to log abundance emphasizes the contribution to the sum of square of residuals from small abundance estimates compared to large. Are small abundance estimates more or less precise than large? Which abundances are more important to estimate accurately? On the other hand, if the precision of each abundance estimate can be quantified, then a weighted regression can be used. This is deferred, because it is more likely that relative precision is known (ranking, ordinal). 
+
+```r id=f519d905-975f-4766-af81-7890e3018b53
+# the log of a normal distribution is a parabola
+AUCnormal <- function(dat, day){
+  day2 <- day^2
+  y<- log(dat)
+  a <- lm (y ~ day + day2)
+  return(a)
+}
+test_dat <- c(1,3,5,2,1); # not symmetrical
+test_day <-c(2, 5, 8, 11, 14);
+a <- AUCnormal(test_dat, test_day);
+p <- coefficients(a)
+print(summary(a)); print(p);
+y <- predict(a) # data=test_day, default predicted by regression 
+par(tcl=0.2)
+plot(log(test_dat)~test_day, pch=20, yaxs="i", 
+     xlim=c(0,1.2*max(test_day)),ylim=range(y)*c(.8,1.2));
+points(test_day,y)
+x= seq(min(test_day), max(test_day), length.out=20)
+y <- p[1]+ p[2]*x+p[3]*x^2
+lines(x,y) 
+# extract Gaussian parameters from regression parametersestimates
+mu <- -0.5* p[2]/p[3];
+sigma <- sqrt(-0.5/p[3]);
+# be careful: regression y=a+bx+cx^2 represents math y=a+bx-cx^2
+# so see c as -c, see? So,
+auc <- sqrt(pi/(-p[3]))*exp( (p[2]^2)/(4*(-p[3])) +p[1]); 
+cat('\n mu =', mu, 'sigma =', sigma,'auc =',auc, '\n')
+abline(v= mu+sigma* c(-2,-1,0,1,2), lty='dotted',col='blue')
+# not logged
+plot(test_dat~test_day, pch=20, yaxs="i", 
+          xlim=c(0,1.2*max(test_day)),ylim=c(0, 1.2*max(test_dat)));
+y1 <- exp(y); # antilog
+lines(x, y1);
+mean0=sum(test_dat*test_day) / sum(test_dat);
+sd0= sqrt( sum(test_dat*(test_day-mean0)^2)/(sum(test_dat)-1)) # 
+cat('\n simple weighted mean =',mean0,' with sd =', sd0,'\n')
+y2 <- dnorm(x,mean0,sd0) * auc; # crude normal scaled to total abundance
+lines(x,y2,col="blue");
+abline(v= mean0+sd0* c(-2,-1,0,1,2), lty='dotted',col='blue')
+```
+
+![__out-0](https://nextjournal.com/data/QmfXJJEoaqNpTU8teah8vApi3U9uUAZFK7J7dKtSvGEBzs?content-type=image%2Fsvg%2Bxml&filename=__out-0)
+
+![__out-1](https://nextjournal.com/data/QmXLdXmAiSJhESVPcQtwGy9MPEByX7JPvXLyhsz6gbv9VY?content-type=image%2Fsvg%2Bxml&filename=__out-1)
+
+### Nonlinear regression (search) for normal distribution
+
+This model minimizes the squares of residuals from trial values of parameters to estimate $\\mu, \\sigma, \\text{and } N.$ It has the advantages of (1) fitting  a complete distribution to possibly truncated observations (started late or ended early), (2) does not emphasize the importance of small abundances compared to large, and (3) provides a direct estimate of the precision of the fitted value for AUC,
+
+```r id=dd9eb99f-5af1-4250-be85-beaab6f142db
+# the model and the optimization in one function
+fitGaussian <-function(x,y,mu,sigma,scale){
+  f = function(p){  # p is c(mu,sigma,scale)
+    d = p[3]*dnorm(x,mean=p[1],sd=p[2]) # predicted from trial values in p
+    sum((d-y)^2) # minimize sum of squared deviations (or another distance)
+  }
+  optim(c(mu,sigma,scale),f, hessian=T) # search for minimum, starting from guesses. Return curvature of SSD manifold at best fit for parameters (Hessian)
+}
+a <- fitGaussian(test_day, test_dat, mu=7.8,sigma=3.5, scale=36);
+mean1 <- a$par[1]; sd1 <- a$par[2]; auc1 <- a$par[3]; SSres <- a$value;
+se <- sqrt(diag(solve(a$hessian))); 
+r2 <- 1-SSres/sum((test_dat - mean(test_dat))^2); # SSreg/SSmean
+cat(sep='', 'mean=',  round(mean1,2), '(', round(se[1],2),
+           '), sd=',  round(sd1,2),   '(', round(se[2],2),
+           '), auc=', round(auc1,2),  '(', round(se[3],2), 
+           '), r2=',  round(100*r2,0),'% \n' );
+par(tcl=0.2);
+plot(test_dat~test_day, pch=20, yaxs="i", 
+          xlim=c(0,1.2*max(test_day)),ylim=c(0, 1.2*max(test_dat)));
+lines(x, auc1*dnorm(x, mean1, sd1))
+abline(v= mean1+sd1* c(-2,-1,0,1,2), lty='dotted',col='blue')
+```
+
+### Monte Carlo fit 
+
+As the first step to a Bayes-LaPlace approach to fitting a multi-level regression, the conventional one river in one year approach with Hamiltonian Monte Carlo. This uses the Stan language for Bayesian statistics via R package *rstan*.
+
+Overfitting is a problem for prediction in ecological systems with a superabundance of habitat indicators. Leave-one-out statistics, where the predicted value of each data point, when it is omitted from the data used to fit the model, is a safeguard against overfitting. The latest development of this is "PSIS-LOO" (Betancourt *et al*., 2017), available via R package *loo*.
+
+experience: scheduling, downloading, booting R\_stan took ~70 seconds. The following test of rstan completed in 76 seconds, mainly compiling. Sampling took less than 1/10 second.
+
+```r id=03172377-598d-44f4-b237-acbeb2ee1da6
+# library(rstan)
+# stancode <- '
+#    data {real y_mean;} 
+#    parameters {real y;} 
+#    model {y ~ normal(y_mean,1);}' # from  R help: stan_model
+# mod <- stan_model(model_code = stancode)
+# fit <- sampling(mod, data = list(y_mean = 0))
+# print(fit)
+# fit2 <- sampling(mod, data = list(y_mean = 5))
+# print(fit2)
+```
+
+```r id=65f9ddf8-9d5a-485f-a7af-d58035399884
+library(rstan)
+stan_Gauss_code <- '
+    functions {
+         // Gaussian to predict temporal abundance of salmon.
+         // faster than (1/(sigma*sqrt(2*pi)))* exp(-(1/2)*((x-mu)/sigma)^2)
+         // sqrt(2) = 1.4142135623731,  sqrt(2*pi)= 2.506628274631
+        vector Gauss(vector x, real mu, real sigma) {
+            return (1/(sigma*2.506628274631))*
+               exp(-square((x-mu)/(1.4142135623731*sigma)));
+        } 
+    } 
+		data {
+			int<lower=0> np;       // count of prior (8)
+			vector [np]  prior;    // timing: m,s; spread: m,s; auc: m,s
+	    int<lower=0> n;        // count of data
+      vector [n]   x;        // day of year for observation
+      vector [n]   y;        // estimate of abundance for thatday
+    }
+    parameters {
+      real <lower=0> timing;      // mean of Gaussian
+      real <lower=0> spread;      // standard deviation of Gaussian
+      real <lower=0> auc;         // area under curve, total abundance
+      real <lower=0> sigma;       // sd of residuals
+    }
+    model {
+      vector [n] ypred;
+          // prior knowledge
+	    timing ~ normal(prior[1], prior[2]); 
+	    spread ~ normal(prior[3], prior[4]);
+	    timing ~ normal(prior[5], prior[6]);
+      sigma  ~ gamma( prior[7], prior[8]);
+          // prediction from trial parameters
+      ypred = auc * Gauss(x, timing, spread);  // Gauss returns a vector 
+          // likelihood of data given prediction
+      y~normal(ypred, sigma);
+    } '
+
+stanc_ret <- stanc(model_code='stan_Gauss_code') # check fussy syntax, compile
+stan_Gauss <- stan_model (stanc_ret=stanc_ret) # create model
+```
+
+```r id=7c1f44ba-4ac9-431b-b6ab-58fd9a3e9962
+# create test data and initial guesses
+# background temporal distribution
+timing <- 280.0;
+spread <-  15.0;
+auc <- 2000.0;
+n = 8; # number of days observed
+# x is day of observation (day of Julian year)
+x <-  floor(seq(from=timing - 2*spread,to=timing + 2*spread, length.out=n)); 
+# y is estimates of abundance
+y0 <- auc*dnorm(x,timing, spread); # without observation error
+y <- round(y*rnorm(y0,1,0.2),0); # add 20% error, proportional to y.
+cat(' x =',x,'\n y =',y,'\n');
+# ----- priors 
+# guess for auc is linear AUC
+auc <- round(AUC(x,y), 0);
+# guess for timing is day weighted by count
+ptm <- round(sum(x*y)/sum(y), 0); # ptm abbreviates prior timing mean
+# guess for spread is weighted variance 
+psm <-  round(sqrt(sum( y* (x-ptm)^2)/sum(y)), 0) # ignore supposed bias
+plot(x, y0, pch=20, ylim=c(0,1.2*max(y)) ); 
+     points(x,y); lines(x,auc*dnorm(x,ptm,psm));
+cat(sep='', 'calculated priors: timing=',ptm,', spread=',psm,', AUC =',auc,'\n') 
+# sigma (sd of normal residuals) has prior gamma(shape=5, scale=1)
+k=exp(seq(-4,3,.25));  # interested in behaviour near zero
+plot( k,dgamma(k,shape=5, rate=1), type="l",ylim=c(0,0.25) );
+lines(k,dgamma(k,shape=10,rate=1), col="red");
+prior <- c(
+  timing_m = ptm,       # 1. about 280 (September 30 is day 273) 
+  timing_s = 7.0,       # 2. range, 4 sd is 1 moon 
+  spread_m = psm,       # 3. about 2 moons. 
+  spread_s = 3,         # 4. range 1 to 4 moons. Avoid negative! 
+  auc_m    = auc,       # 5. simplest estimate
+  auc_s    = 0.25*auc,  # 6. expect 0/5 to 1/5 of estimate
+  sigma_shape = 10.0,   # 7. high and wide. Y should be scaled: y/max(y) 
+  sigma_scale = 1.0)    # 8. 
+print(prior) # shows names
+dat <- list(np=8, prior=prior, n=8, x=x, y=y); 
+
+# might need to initialize HMC
+# one chaing for testing
+# init1 <- list(
+#  chain1=list(timing=ptm, spread=psm, auc=auc, sigma=10.0));
+# print(as.data.frame(init1));
+#  four chains for fitting
+# init4 <- list(
+#  chain1=list(timing=ptm*1.10, spread=psm*1.10, auc=auc*1.10, sigma=12.0),
+#  chain2=list(timing=ptm,1.05, spread=psm*1.05, auc=auc*1.05, sigma=10.0),
+#  chain3=list(timing=ptm*0.95, spread=psm*0.95, auc=auc*0.95, sigma=8.0),
+#  chain4=list(timing=ptm*0.90, spread=psm*0.90, auc=auc*0.90, sigma=6.));
+# print(as.data.frame(init4));
+
+# I used these print statements in model block to debug Stan code
+#  with (iter=1, chains=1); 
+#      // print("timing =",timing); // to check Stan code
+#      // print("spread =",spread);
+#      // print("auc =",auc);
+#      // print("sigma =",sigma);
+#      // print("x =",x);
+#      // print("y =",y);
+#      // print("ypred =",ypred);
+```
+
+![__out-0](https://nextjournal.com/data/QmcxhMLqNpi5rJQmwUQru5Rkwas8JeBDb7mWr8C1bnxLZq?content-type=image%2Fsvg%2Bxml&filename=__out-0)
+
+![__out-1](https://nextjournal.com/data/QmXB3SAfuPP8QfPa1XAw1Arc7iyap5EMKyTgKLh3jR31ES?content-type=image%2Fsvg%2Bxml&filename=__out-1)
+
+```r id=3c693962-922d-4dba-b155-5a005237218e
+## test my function in Stan function block
+#   expose_stan_functions(stan_Gauss);
+#   Gauss(c(2,3,4), 0, 1); # [1] 0.0539909665 0.0044318484 0.0001338302
+#   dnorm(c(2,3,4), 0,1) # [1] 0.0539909665 0.0044318484 0.0001338302
+```
+
+```r id=9f947a04-7b34-40e9-974b-2fbabdcf7f05
+fit <- sampling(stan_Gauss, data=dat, chains=4, iter=2000); # init=init1);
+print(fit)
+pairs(fit, condition=0.2);
+```
+
+### Experience
+
+Stan is "strongly typed" to enforce rigor in coding, an attempt to avoid subtle bugs. Which takes some getting used to, a contrast to R. I found **vector \[n\] x** confusing compared to **real x \[n\]**, the latter being an array, so you could have **real \[m\] x \[n\]** which would be n arrays of m values. And then row\_vectors which are not vectors or arrays, nor rows or columns of a matrix. I see the point: protect domain experts from their otherwise sloppy linear algebra.
+
+This model does not work with the default improper priors, the sampling heads off to $\\text{spread} \\to \\infty$despite initializing in the vicinity of the best fit. The prior knowledge assigned to parameters is derived from simple models applied loosely (large values for the prior regarding range of a parameter). Because there is adequate data, the effect of prior knowledge will be small. When there is a lot of data, by modeling many years and rivers at one, the effect of prior knowledge (*a priori* probability distributions for parameters) on the results (ditto but *a posteriori*) will be smaller again.
+
+Parameters were recovered accurately, but that is because the true model was known. The true model is unknown (and effectively infinitely complicated) and a serviceable while  simplistic description will be discovered from exploring real data.
+
+## Many Rivers, Many Years
+
+### Multi-level Regression
+
+A simple, linear, multivariate, multilevel regression model would be
+
+$$
+y=\mathcal{N} (\alpha + X \beta + Z \gamma, \  \sigma)
+$$
+
+where ***X*** is the matrix of independent variables and the fitted parameters $\\alpha$ (intercepts) and $\\beta$ (slopes) define the overall or average linear regression, the "fixed effects". If there were no more to the model, this would describe 'complete pooling" of the data. The matrix ***Z*** describes the groups in ***X*** and $\\gamma$is the fitted estimate of the deviation of the parameter $\\alpha$ by groups (easily extended to have slope vary by group).  Thus$Z\\gamma$makes this similar to a "random effects" model, where, typically the intention is to discern the fixed effects and discard the random effects: what is behind the noise that can be accounted for via groups?  In the Bayes-Laplace paradigm, the group effects are real, important for prediction, and modeled as draws from a random distribution. The choice of that distribution involves prior knowledge (thus '"hyper-priors" as pointless jargon) and its parameters are fitted as part of this model. The observed (dependent) variable to be predicted by the model, $y,$and the residuals (predictions minus observations) are assumed (more prior knowledge) to have a Normal distribution $\\mathcal{N}$with standard deviation $\\sigma.$
+
+Some quotes, about how "partial pooling" shares information among groups, might be helpful at this point:
+
+"An extreme approach would be to completely pool all the data and estimate a common vector of regression coefficients *β*. At the other extreme, an approach with no pooling assigns each group its own coefficient vector$\\beta$ that is estimated separately from the other groups. A hierarchical model is an intermediate solution where the degree of pooling is determined by the data and a prior on the amount of pooling." - Stan User's Guide version 2.19 page 23.
+
+"While complete pooling or no pooling of data across groups is sometimes called for, models that ignore the grouping structures in the data tend to underfit or overfit (Gelman *et al.*, 2013). Hierarchical \[multi-level\] modeling provides a compromise by allowing parameters to vary by group at lower levels of the hierarchy while estimating common parameters at higher levels.** Inference for each group-level parameter is informed not only by the group-specific information contained in the data but also by the data for other groups as well.** This is commonly referred to as *borrowing strength* or *shrinkage*." - [http://mc-stan.org/rstanarm/articles/glmer.html](http://mc-stan.org/rstanarm/articles/glmer.html)
+
+### River and Year Effects on Timing and Spread
+
+The background model for temporal distribution of salmon spawner abundance is two parameters, timing and spread. This is applied to all years and all rivers. The other part of the background is the overall abundance of salmon for each year, the run size. If the data for all rivers were pooled, there would only be $2 + \\text{nyear}$ parameters.
+
+The departure from that background for any one river, the river effect on timing and spread, is two parameters.  In this model,  the prior knowledge for the probability distributions for the river effect parameters proposes they are zero unless the data unambiguously supports the existence of such a year effect (across all of the rivers). The exponential probability distribution provides that effect, $ Pr(x)=\\beta e^{-\\beta x}.$ This idea is used for lasso regression where the objective is to remove or ignore parameters that are unimportant. 
+
+```r id=2635be99-4f0e-4928-9c36-371fb0f0e1f3
+# example of expontial probability density distribution
+x= exp(seq(-4,log(5),.25));
+y= dexp(x,rate=2); 
+par(xaxs="i", yaxs="i", tcl=0.2, pch=20)
+plot(x,y, type="l", xlim=c(0,5), ylim=c(0,1.1*y[1]),
+    ylab="Probability Density");
+par("usr")
+x1= 0:5; y1=dexp(x1,rate=2);
+points(x1,y1);
+print( cbind(x1,round(y1,4)));  
+# 2.00.2707 0.0366 0.0050 0.0007
+```
+
+![__out-0](https://nextjournal.com/data/QmdvYpbYohatS8UY24kQvFLK3kVbEVaohmAZZsHZfrXL2z?content-type=image%2Fsvg%2Bxml&filename=__out-0)
+
+River effects are modeled the same way. This first model does not fit a year X river effect, which would require $2 \\times \\text{nyear}$ parameters. It is possible that timing and spread may be correlated across years or across rivers. Conceptually,  if spawner timing (mean day over all rivers) for some year is late it may have less spread as a result of waiting for a migration barrier to drop. Conversely, if spawner timing  for some river (mean day over all years) is late it may have more spread perhaps because of an lengthy and arduous up-river migration.  Those example indicate there will be habitat indicators that are covariates (predictors) for the stream and year effects on temporal distributions.  This model does not include such covariates, but it lays the foundation for that kind of extension.
+
+### River and Year Effects on Abundance
+
+The area under the curve of spawner abundance is not the same as the number of spawners because a spawner will reside in the spawning ground for many days. That residence time may be longer for females guarding redds than for males that drift downriver after spawning. A model that involved the accumulation of identified spawners would involve a cumulative distribution function, possibly preferable. But in this case the total annual abundance of spawners over all rivers in a year, is not the run size considered as the number of salmon indepent of multiple observations of the same fish.  Determining number of fish from the sum of daily abundances of fish requires knowing the duration of a fish in a river. That will be an important calibration parameter, but probably complicated by the need for habitat indicators: perhaps warmer river temperatures mean shorter spawning ground residence. 
+
+Abundance is primarily a year effect. There is little prior knowledge, other than non-negative, in this model, but that will not be typical. Autocorrelations apply, such as  known long trends in salmon abundance, and four-year generation cycles. The application of this model is likely to involve known abundances for all but the last year. 
+
+Independent of years (or average over all years)  there is a river effect for abundance: the proportion of the total that goes to each river. Perhaps proportions vary due to spawning ground area  and/or  quality, or river length. The existence of sub-populations (or populations within a metapopulation) of salmon that home to one stream and not to others is an imporatn complication. This model assumes that any such sub-populations vary identically among years.  The proportions by river sum to the entire abundance of salmon, therefore the fitted values for that vector of parameters ( with length* nriver*) are not independent, they must sum to unity. Such a vector is a simplex and a specific probability model is required to meet that constraint, the Dirichlet distribution (Gelman et al 2017, page ).
+
+After considering temporal distributions and abundance by year and river proportion, the abundance in each year in each river (i.e. the AUC) is estimated as 
+
+$$
+\hat{y}_{i,j,k}= \mathcal{N} (\text{day}_{i}, \mu_{j,k}, \sigma_{j,k})
+$$
+
+where the timing $\\mu\_{j,k}$ for river $j$ and year $k$  *nriver* X *nyears* parameters. We might expect those parameters to have spatial correlation length scales (near or distant in measures of river properties) and temporal correlation length scales (successive generations and population trends), so there is plenty of scope for additional data and knowledge to sharpen this type of model. The point is, that scope is zero without this kind of multilevel regression. The daily observations are predicted from all of these parameters. The probability of that prediction, given the data and an assumption about the distribution of residuals, is the basis for describing the joint probability density in the parameter space, and thereby estimating the parameters and their marginal distributions, e.g. median (50% quantile) with 10% and 90% quantiles to indicate precision. While the correlations between parameter is typically ignored for reporting, it is required for predicting. One aspect of predicting is to simulate data described by the fitted model and see if that looks like the observed data.
+
+### River proportion
+
+Describing the relative abundance of spawners between rivers as the proportion of salmon that enter that river means the fitted estimates for those proportions across all river must sum to 1. That vector of non-negative parameters is a *unit simplex*, the Direchlet distribution (Stan Functions Reference v2.19 §23.1 p126) describes the *multinomial *probabilities for values within a simplex. The Direchlet parameter describes how even the probabilities are, with large values (>100) creating a even distribution and small values (< 1/00) creating extremes (one of ~1 and all others ~zero). Using 1 as the default looks like uniform random.
+
+```r id=efc8b4a8-3ece-45f8-9bae-f5596f25ed54 no-exec
+ data {
+   int <lower=1> nriver;
+   real <lower=0> alpha; // large alpha means even proportions.
+ }
+parameters {
+    simplex [nriver] river_prop;  // constrained 0<x<1 and sum=1.
+}
+model {
+    river_prop ~ direchlet(alpha); // sampling for run proportions
+}
+```
+
+"In theory, a Bayesian model should include all relevant substantive knowledge and subsume all possible theories. In practice, it won’t." - Jeffrey B. Arnold [https://jrnold.github.io/bayesian\_notes/model-checking.html](https://jrnold.github.io/bayesian_notes/model-checking.html)
+
+Any model is one of many possible variants, so we need a basis for comparing models. How the model fits data can be based on prediction ability using "cross validation" to "leave one out" (LOO) when fitting and predict that "left out observation" from the fit. Conceptually, the fitting is repeated for every data point, but there is a mathematical alternative.  The required information is the log likelihood of each data point;  produced and saved in the *generated quantities* block in a Stan model. [http://mc-stan.org/loo/reference/loo-package.html ](http://mc-stan.org/loo/reference/loo-package.html)
+
+```r id=e56a1401-8271-4279-a601-5ec0612be753
+library(rstan)
+stan_MultiGauss_code <- '
+functions {
+     // Gaussian to predict temporal abundance of salmon.
+     // faster than (1/(sigma*sqrt(2*pi)))* exp(-(1/2)*((x-mu)/sigma)^2)
+     // sqrt(2) = 1.4142135623731,  sqrt(2*pi)= 2.506628274631
+     /// NOT vector version
+  real Gauss(real x, real mu, real sigma) {
+    return (1/(sigma*2.506628274631)) *
+           exp(-square((x-mu)/(1.4142135623731*sigma)));
+    } 
+} 
+data {
+  int<lower=0>        np;      // length of vector of priors
+	vector [np]      prior;      // background, rivers, years
+  int<lower=0>    nriver;      // how many rivers
+  int<lower=0>     nyear;      // how many years
+	int<lower=0>     ndata;      // how many data: all days, rivers, years
+  vector [ndata]       x;      // day of year for each observation
+  vector [ndata]       y;      // estimate of abundance for each day in x
+  vector [ndata] river_id;     // id of river in data. integer
+  vector [ndata]  year_id;     // id of year   in data. integer  
+parameters {
+  real   <lower=0> timing;         // all years and rivers
+  real   <lower=0> spread;         // all years and rivers
+  vector <lower=0> [nyear] run;    // annual spawner abundance
+  vector  [nyear] year_timing;     // by year, all rivers
+  vector  [nyear] year_spread;     // by year, all rivers
+  vector  [nriver] river_timing;   // by rivers, all years
+  vector  [nriver] river_spread;   // by rivers, all years
+  simplex [nriver] river_prop;     // fraction of run
+  real   <lower=0> sigma;          // stdev of Normal residuals
+}
+model {
+  vector [ndata] ypred;
+  integer        year;
+  integer        river;
+  real           timing_pred;
+  real           spread_pred;
+  // prior knowledge of probability distributions of parameters
+	timing        ~ normal(prior[1], prior[2]); 
+	spread        ~ normal(prior[3], prior[4]);
+	vector [nyear] run ~ normal(prior[5], prior[6]);  // scale 1 to 10?
+  year_timing   ~ exponential(prior[7]);            // same all years
+  year_spread   ~ exponential(prior[8]);
+  river_timing  ~ exponential(prior[9]);            // same all rivers
+  river_spread  ~ exponential(prior[10]);
+  river_prop   ~ dirichlet(1);                      // prior is alph=1. 
+  sigma        ~ gamma(prior[11], prior[12]);
+  // prediction from a sampled point in parameters space
+  for (j in 1:ndata){
+		year = year_id[j];  
+    is   = river_id[j];
+    timing_pred=timing + year_timing[year] + river_timing[river];
+    spread_pred=spread + year_spread[year] + river_spread[river];
+    ypred[j] = run[year] * river_prop[river] *
+               Gauss(x[j], timing, spread);
+  }
+  // accumulate log likelihood of data given prediction
+  y~normal(ypred, sigma);
+} 
+generated quantities {
+  vector[ndata] log_lik; 
+  log_lik = normal_lpdf(ypred | y, sigma); 
+} '
+
+stanc_ret <- stanc(model_code='stan_Gauss_code') # check fussy syntax, compile
+stan_Gauss <- stan_model (stanc_ret=stanc_ret) # create model
+```
+
+## References
+
+Cunningham, John P. 2012. Gaussian Processes for machine learning. Invited lecture at the Machine Learning Summer School 2012, La Palma, Spain, Apr. 18, 2012. Video: [https://www.youtube.com/watch?v=BS4Wd5rwNwE  ](https://www.youtube.com/watch?v=BS4Wd5rwNwE)orcid.org/0000-0002-1805-9743
+
+Gelman, Andrew, and Jennifer Hill. 2007. *Data Analysis Using Regression and Multilevel- Hierarchical Models*. Cambridge, United Kingdom: Cambridge University Press.
+
+Gelman, Andrew, J. B. Carlin, Hal S. Stern, David B. Dunson, Aki Vehtari, and Donald B. Rubin. 2013. *Bayesian Data Analysis*. Third. London: Chapman &Hall/CRC Press.
+
+Betancourt, Michael (2018). "A Conceptual Introduction to Hamiltonian Monte Carlo". [arXiv](https://en.wikipedia.org/wiki/ArXiv):[1701.02434](https://arxiv.org/abs/1701.02434). [Bibcode](https://en.wikipedia.org/wiki/Bibcode):[2017arXiv170102434B](http://adsabs.harvard.edu/abs/2017arXiv170102434B).
+
+Bob, Carpenter; Andrew, Gelman; Matthew, Hoffman; Daniel, Lee; Ben, Goodrich; Michael, Betancourt; Marcus, Brubaker; Jiqiang, Guo; Peter, Li; Allen, Riddell (2017). "Stan: A Probabilistic Programming Language". *Journal of Statistical Software*. **76** (1): 1–32. [doi](https://en.wikipedia.org/wiki/Digital_object_identifier):[10.18637/jss.v076.i01](https://doi.org/10.18637%2Fjss.v076.i01). [ISSN](https://en.wikipedia.org/wiki/International_Standard_Serial_Number) [1548-7660](https://www.worldcat.org/issn/1548-7660).
+
+Vehtari, A., Gelman, A., and Gabry, J. (2017). Practical Bayesian model evaluation using leave-one-out cross-validation and WAIC. *Statistics and Computing*. 27(5), 1413–1432. [doi:10.1007/s11222-016-9696-4](doi:10.1007/s11222-016-9696-4). [Online](https://link.springer.com/article/10.1007/s11222-016-9696-4), [arXiv preprint arXiv:1507.04544](https://arxiv.org/abs/1507.04544).
+
+[nextjournal#numberdef#343ae525-d1b1-4786-87da-1026c6e52cbc]: https://nextjournal.com/collection/learn
+
+[nextjournal#numberref#343ae525-d1b1-4786-87da-1026c6e52cbc]: https://nextjournal.com/collection/learn
+
+<details id="com.nextjournal.article">
+<summary>This notebook was exported from <a href="https://nextjournal.com">https://nextjournal.com</a></summary>
+
+```edn nextjournal-metadata
+{:nodes
+ {"03172377-598d-44f4-b237-acbeb2ee1da6"
+  {:compute-ref #uuid "d14d88ec-1e57-41e8-af6c-adbe67ea8838",
+   :exec-duration 76154,
+   :kind "code",
+   :name "test rstan",
+   :output-log-lines {:stdout 207},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"],
+   :stdout-collapsed? true},
+  "2635be99-4f0e-4928-9c36-371fb0f0e1f3"
+  {:compute-ref #uuid "c73af163-e286-443c-8528-f4153bdfc1d8",
+   :exec-duration 633,
+   :kind "code",
+   :output-log-lines {:stdout 8},
+   :refs (),
+   :runtime [:runtime "6ab9c139-a9db-4a51-b8a7-7a0006deb61b"]},
+  "278d4e06-0040-4639-be6b-56815721e768"
+  {:compute-ref #uuid "d1a3de09-1b83-4dcb-a01b-b9740deefc42",
+   :exec-duration 359,
+   :kind "code",
+   :name "Local Functions",
+   :output-log-lines {:stdout 0},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"],
+   :stdout-collapsed? true},
+  "28eb4008-2cc9-4c13-878e-0f116166d530"
+  {:compute-ref #uuid "2be80de1-bcbc-4816-83ee-6316d1d34e62",
+   :exec-duration 583,
+   :kind "code",
+   :name "linear AUC",
+   :output-log-lines {:stdout 1},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "343ae525-d1b1-4786-87da-1026c6e52cbc" {:kind "number", :value 1},
+  "3c693962-922d-4dba-b155-5a005237218e"
+  {:compute-ref #uuid "256b067a-6f61-4fe7-8622-9f1e77b561ff",
+   :exec-duration 831,
+   :kind "code",
+   :name "check function Gauss",
+   :output-log-lines {:stdout 2},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "40f77232-2a2f-4135-aaa2-f838daf52d2b"
+  {:environment
+   [:environment
+    {:article/nextjournal.id
+     #uuid "02b43d00-64dd-4e9e-b449-22e1ff1c1ef9",
+     :change/nextjournal.id
+     #uuid "5d1bc7bf-176e-4b65-b926-fb36aafae1c1",
+     :node/id "fbb04fb9-e412-4a90-a464-b3950395ffd6"}],
+   :environment? false,
+   :kind "runtime",
+   :language "r",
+   :name "R_rstan",
+   :resources {:machine-type "n1-standard-4"},
+   :type :nextjournal,
+   :docker/environment-image
+   "docker.nextjournal.com/environment@sha256:7bb0d7b3de66e36e00c58c11200a5f177eac363d2cb978a98c4a44a71603dbdd"},
+  "61e61ef8-1df9-45c9-8c3c-9c6a4271793e"
+  {:compute-ref #uuid "ed9d9411-f414-4d6e-a7d9-feaf9f79bfef",
+   :exec-duration 771,
+   :kind "code",
+   :name "total abundance",
+   :output-log-lines {:stdout 0},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "65f9ddf8-9d5a-485f-a7af-d58035399884"
+  {:compute-ref #uuid "00751021-3f24-47eb-a358-1d19dac57eb5",
+   :exec-duration 79977,
+   :kind "code",
+   :name "stan_Gauss",
+   :output-log-lines {:stdout 0},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "66cabbcc-464f-4abe-a8c6-1cd43c43c73e"
+  {:compute-ref #uuid "ce082dee-ff33-4a13-8a91-d05a1d9ed23e",
+   :exec-duration 861,
+   :kind "code",
+   :name "sampling days",
+   :output-log-lines {:stdout 4},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "6ab9c139-a9db-4a51-b8a7-7a0006deb61b"
+  {:environment
+   [:environment
+    {:article/nextjournal.id
+     #uuid "5b45e6f7-fe51-488a-b89b-1c8f74dfb387",
+     :change/nextjournal.id
+     #uuid "5cc978ff-5661-4b40-ae9c-a11ad582e02f",
+     :node/id "4e307b44-52c3-4f79-9f3d-23047859e2fa"}],
+   :kind "runtime",
+   :language "r",
+   :type :nextjournal},
+  "7c1f44ba-4ac9-431b-b6ab-58fd9a3e9962"
+  {:compute-ref #uuid "00fb9415-ccf7-4cf7-8ecb-c6f189b09ea2",
+   :exec-duration 504,
+   :kind "code",
+   :output-log-lines {:stdout 7},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "9f947a04-7b34-40e9-974b-2fbabdcf7f05"
+  {:compute-ref #uuid "2dc911cf-2479-497c-a0a0-5a8a92ba04a2",
+   :exec-duration 289,
+   :kind "code",
+   :output-log-lines {:stdout 0},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "c958a86f-c6c3-4079-885a-f9881e2d6006"
+  {:compute-ref #uuid "6c49f21e-328d-4736-9aa3-314265dd31e3",
+   :exec-duration 872,
+   :kind "code",
+   :name "total effect",
+   :output-log-lines {:stdout 35},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "dd9eb99f-5af1-4250-be85-beaab6f142db"
+  {:compute-ref #uuid "17ddb8f1-1ae4-4e68-988d-f05d128086f4",
+   :exec-duration 444,
+   :kind "code",
+   :name "nonlinear Gaussian",
+   :output-log-lines {:stdout 0},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "e56a1401-8271-4279-a601-5ec0612be753"
+  {:kind "code",
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "e9f251a2-13d0-4149-899f-d65cd08277ad"
+  {:compute-ref #uuid "50620913-a149-4745-89ab-f6b76697b85f",
+   :exec-duration 645,
+   :kind "code",
+   :name "year and river effects",
+   :output-log-lines {:stdout 17},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]},
+  "efc8b4a8-3ece-45f8-9bae-f5596f25ed54" {:kind "code-listing"},
+  "f519d905-975f-4766-af81-7890e3018b53"
+  {:compute-ref #uuid "edb28861-982b-4e51-8c46-1f671cae0e58",
+   :exec-duration 861,
+   :kind "code",
+   :name "quadratic to Gaussian",
+   :output-log-lines {:stdout 26},
+   :refs (),
+   :runtime [:runtime "40f77232-2a2f-4135-aaa2-f838daf52d2b"]}}}
+```
+</details>

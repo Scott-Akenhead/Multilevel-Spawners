@@ -1,0 +1,54 @@
+Modeling Salmon Counts with Stan
+
+Understanding the Problem
+You have count data for salmon over multiple years, with each year containing multiple observations. The data likely exhibits overdispersion (variance greater than the mean) due to the zero counts and the underlying biological process.
+
+Proposed Model: Zero-Inflated Negative Binomial (ZINB)
+Given the characteristics of your data, a Zero-Inflated Negative Binomial (ZINB) model is a suitable candidate. This model accounts for both overdispersion and excess zeros.
+
+Stan Model Structure
+data {
+  int<lower=1> N;         // total number of observations
+  int<lower=1> Y;         // number of years
+  int<lower=1> N_y[Y];    // number of observations per year
+  int<lower=0> count[N];  // salmon counts
+  vector[N] time;         // time of observation within each year
+}
+parameters {
+  vector[Y] mu;               // mean salmon count for each year
+  vector<lower=0>[Y] sigma;   // standard deviation of salmon count for each year
+  vector<lower=0, upper=1>[Y] zi_prob; // zero inflation probability for each year
+  vector[N] log_lambda;       // log lambda for negative binomial
+}
+model {
+  for (y in 1:Y) {
+    for (n in 1:N_y[y]) {
+      real lambda;
+      lambda = exp(log_lambda[n + sum(N_y[:y-1])]);
+      target += log_sum_exp(log1m(zi_prob[y]), log(zi_prob[y]) + 
+          neg_binomial_2_log_lpmf(count[n + sum(N_y[:y-1])] | lambda, sigma[y]));
+    }
+    mu[y] ~ normal(100, 10);              // Adjust priors as needed
+    sigma[y] ~ cauchy(0, 2);
+    zi_prob[y] ~ beta(1, 2);              // Adjust priors as needed
+  }
+  log_lambda ~ normal(log(mu[y]), sigma[y]); // For each year
+}
+
+Model Explanation
+* Data: Includes total observations, number of years, observations per year, salmon counts, and observation time.
+* Parameters: Mean and standard deviation for each year, zero inflation probability for each year, and log lambda for the negative binomial distribution.
+* Model:
+* Iterates over each year and its observations.
+* Calculates lambda for the negative binomial using the log link.
+* Uses the log_sum_exp function for the ZINB likelihood.
+* Specifies priors for mu, sigma, and zi_prob.
+* Models log_lambda as normally distributed around the year's mean and standard deviation.
+
+Important Considerations
+* Priors: Adjust priors based on prior knowledge or expert opinion.
+* Model fit: Use posterior predictive checks and other diagnostics to assess model fit.
+* Overdispersion: If overdispersion is still an issue, consider alternative distributions like the Conway-Maxwell-Poisson.
+* Time dependence: Incorporate time dependence if there's evidence of autocorrelation in the data.
+
+By fitting this ZINB model, you can estimate the mean and variability of salmon counts for each year, as well as the proportion of zero counts due to true absence versus sampling issues.

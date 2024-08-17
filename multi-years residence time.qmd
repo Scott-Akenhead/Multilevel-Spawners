@@ -1,0 +1,176 @@
+---
+title: "Multi-Years Residence Time"
+author: "Scott A. Akenhead"
+date: today
+format: pdf
+editor: visual
+execute:
+  cache: true
+knitr:
+  opts_chunk: 
+    hold: true
+---
+
+```{r}
+#| label: set-up
+#| echo: false
+#| output: false
+library (magrittr) ; library (ggplot2); library(knitr); library(moments)
+```
+
+# Intro
+
+**Problem:** Spawners have a residence time on spawning grounds so they are observed repeatedly in repeated surveys. The conventional analysis for surveys in one year is a linear cumulative abundance with time, corrected for repeated observations of any one spawners, by dividing the cumulative abundance by spawner residence time (AUC, area under curve). The resulting estimate of annual spawner abundance is directly proportional to the assumed residence time. That changes measures of absolute abundance (each survey) to an index of relative abundance (annual abundance). Can we do better?
+
+**Solution:** The abundance of spawners (without considering sex, age, size, condition, injury, history, genetics,) at an instant, results from how they entered the spawning ground, the distribution of entry timing. If residence time is constant, then the distribution of exit timing is the same distribution, merely delayed. So the density of spawners is the cumulative distribution of entry minus the cumulative distribution of exits. If residence time is short compared to the spread of entry timing, then the first entrants will exit before the last entrants. If entry timing is a Gauss distribution ("normal") the density of spawners with time will be normal, and only an extremely long residence time, compared to the spread of entry time, will create a platykurtic (more flat) distribution of spawner density.
+
+## Example
+
+Here is an example with $\sigma_{entry} = 7 \ \text{and} \ residence =7$, where in 100 thousand spawners results in a maximum spawner density of 38.2 thousand.
+
+```{r}
+#|label: lepto
+
+abundance = 1e5
+first_day = 260
+n_days = 70
+days = first_day:(first_day+n_days -1)
+entry_mean = 280
+entry_sd = 7
+residence = 7
+entry_cumulative = abundance * pnorm(days, entry_mean,entry_sd)
+exit_cumulative = c(rep(0,residence), entry_cumulative[1:(n_days-residence)])
+spawner_density = entry_cumulative - exit_cumulative
+plot_dat = data.frame(Days=days, Entry=entry_cumulative, Exit = exit_cumulative, Density=spawner_density)
+ggplot(plot_dat, aes(Days, Entry) ) + theme_bw() +
+    geom_line(col="blue") +
+    geom_line(aes(Days, Exit), col="red") +
+    geom_line(aes(Days, Density),col="black") 
+
+```
+
+## Effect of Residence Time
+
+And again but $residence=7,14,21$; with statistics to compared the spawner density distributions.
+
+```{r}
+#|label: platy
+residence = 7
+exit_cumulative = c(rep(0,residence), entry_cumulative[1:(n_days-residence)])
+spawner_density = entry_cumulative - exit_cumulative
+dat7 = data.frame(Days=days, Exit = exit_cumulative, Density=spawner_density)
+residence = 14
+exit_cumulative = c(rep(0,residence), entry_cumulative[1:(n_days-residence)])
+spawner_density = entry_cumulative - exit_cumulative
+dat14 = data.frame(Days=days, Exit = exit_cumulative, Density=spawner_density)
+residence = 21
+exit_cumulative = c(rep(0,residence), entry_cumulative[1:(n_days-residence)])
+spawner_density = entry_cumulative - exit_cumulative
+dat21 = data.frame(Days=days, Exit = exit_cumulative, Density=spawner_density)
+
+plot_dat = data.frame( 
+    Residence=rep(c(7,14,21), each = n_days),
+    Days = rep(days,3),
+    Entry = rep(entry_cumulative,3),
+    Exit = c(dat7$Exit,dat14$Exit,dat21$Exit),
+    Density = c(dat7$Density,dat14$Density,dat21$Density) )
+
+ggplot(plot_dat, aes(Days, Entry) ) + theme_bw() +
+    geom_line(col="blue") +
+    geom_line(aes(Days, Exit), col="red") +
+    geom_line(aes(Days, Density),col="black")+
+    facet_grid(rows=vars(Residence))
+
+```
+
+## Statistics of Spawner Distribution
+
+The resulting spawner density distributions look symmetric and normal. Is that true?
+
+> Doane, D. P., & Seward, L. E. (2011). Measuring Skewness: A Forgotten Statistic? Journal of Statistics Education, 19(2). <https://doi.org/10.1080/10691898.2011.11889611>
+>
+> Pearson, K. (1895), “Contributions to the Mathematical Theory of Evolution, II: Skew Variation in Homogeneous Material,” Transactions of the Royal Philosophical Society, Series A, 186, 343-414.
+
+```{r}
+#| label: summary
+#| hold: Hold
+Weighted_m_sd = function (x,w){
+    w_sum = sum(w)
+    m_w = sum(x*w)/w_sum
+    sd_w = sqrt( sum(w*(x-m_w)^2) / w_sum )
+    return (c(m_w=m_w, sd_w=sd_w))
+}
+Shape=function(x){ 
+    n_inv= 1/(length(x)-1)
+    skew =     n_inv * sum( ( (x-mean(x))/sd(x) )^3 )
+    kurtosis = n_inv * sum( ( (x-mean(x))/sd(x) )^4 )
+    return(c(skew,kurtosis))
+}
+Weighted_Shape=function(x,w){
+    a = Weighted_m_sd(x,w)
+    m=a[1];s=a[2] # weighted mean, weighted stdev
+    w_sum_inv = 1/sum(w)
+    sk = w_sum_inv * sum( w*( (x-mean(x))/sd(x) )^3 )  
+    ku = w_sum_inv * sum( w*( (x-mean(x))/sd(x) )^4 ) 
+    return(c(m_w=m,sd_w=s,skew_w=sk,kurtosis_w=ku))
+}
+Median_Index=function(x){
+    n_x = length(x); 
+    a =   cumsum(x); 
+    a_half = 0.5* a[n_x]; 
+    which( (a - a_half) > 0)[1] #first
+}
+
+a7=summary(dat7$Density)
+a14=summary(dat14$Density)
+a21=summary(dat21$Density)
+a0= data.frame(residence = c(7,14,21),
+    min=   c(a7[1],a14[1],a21[1]),
+    Q1=    c(a7[2],a14[2],a21[2]),
+    Q2=    c(a7[3],a14[3],a21[3]),
+    mean=  c(a7[4],a14[4],a21[4]),
+    Q3=    c(a7[5],a14[5],a21[5]),
+    max=   c(a7[6],a14[6],a21[6]) )
+
+
+
+# a7=Shape(dat7$Density)
+# a14=Shape(dat14$Density)
+# a21=Shape(dat21$Density)
+# a= data.frame(residence = c(7,14,21),
+#               skew = c(a7[1],a14[1],a21[1]),
+#               kurtosis = c(a7[2],a14[2],a21[2]) )
+# kable( a, align='c', digits=c(0,2,2), caption = 'Shape of Spawner Density')
+
+a7=Weighted_Shape(days,dat7$Density)
+a14=Weighted_Shape(days,dat14$Density)
+a21=Weighted_Shape(days,dat21$Density)
+md = c(days[Median_Index(dat7$Density)],days[Median_Index(dat14$Density)],days[Median_Index(dat21$Density)])
+
+a= data.frame(residence = c(7,14,21),
+              mean = c(a7[1],a14[1],a21[1]),
+              median= md,
+              stdev = c(a7[2],a14[2],a21[2]), 
+              skew = c(a7[3],a14[3],a21[3]),
+              kurtosis = c(a7[4],a14[4],a21[4]) )
+
+# Pearson median skewness
+a2 = (3* (a$mean -a$median) / a$stdev) %>% round(3)
+
+# output
+kable(a0, align='crrrrrr', digits = 0, caption = 'Spawner Density Statistics')
+kable( a, align='c', digits=2, caption = 'Density-Weighted Shape of Spawner Density Distribution') 
+cat('Pearson median skewness:', a2)
+```
+
+# Discussion
+
+## Skew and Kurtosis
+
+At this point, differences in skew and kurtosis do not look useful. The spawner density distributions are effectively symmetric Gaussian, echoing the entry timing model. This conclusion is constrained to situations where the spread of spawner entry timing is large, such that spawners enter over a period of \~4 weeks $(\sigma =7)$, and residence time is similar, in this case between 7 and 21 days.
+
+## Confounded Parameters
+
+Although they are not independent, it looks like residence time can be distinguished from total spawner abundance (run size) by timing of the spawner density: a large run with a short residence time would be earlier than a small run with a long residence time. However, that suggests mean entry timing is also confounded.
+
+Sufficient observations of sufficient precision can distinguish spawner density distribution with time. What happens with multiple years where abundance varies greatly but residence time, entry timing, and entry spread vary little, remains to be seen.

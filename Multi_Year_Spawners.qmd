@@ -1,0 +1,542 @@
+---
+title: "Multi-Years Spawners"
+author: "Scott A. Akenhead"
+date: today
+format: pdf
+editor: visual
+execute:
+  cache: true
+  hold: Hold 
+---
+
+```{r}
+#| label: setup
+#| echo: false
+#| output: false
+library(rstan);library(magrittr);library(ggplot2); 
+library(patchwork); library(knitr)
+rstan_options(auto_write = TRUE) # avoid recompiling if not changed
+```
+
+# Intro
+
+**Objective:** Fit a spawner abundance model to one spawning site using many years of data at once. For example, wild Sockeye spawning in the Okanagan River above Osoyoos Lake.
+
+**Model:** Derived from a subset of *Multilevel-Regression-Spawner*: Multiple samples in each of multiple years; one river.
+
+**Simulation:** Derived from *Simulate Spawners*. This version creates observation dates that vary by year.
+
+# Stan code
+
+This will fit a different $abundance$ of spawners the Gauss ("normal") probability density distribution (PDD), $\mathcal{N}(\mu,\sigma)$, to spawner counts each year. This is a multi-level model: information is shared between years: samples for total **abundance** in one year are draws from a fitted PDD of abundances. That improves the precision of that year's abundance PDD (the fit) with information from the other years. Similarly for the varying location and spread of **spawner entry time** in every year: these parameters are sampled from a fitted PDD of those annual values.
+
+The format for the data input to the Stan model is new. There is a different number of observations each year. The dates for those observations vary each year. The count $y_{true}$ of live spawners, and the day of the year $day$ of that count, are in two ragged arrays: $day[n\_year,max\_obs]$and $y_{true} [n\_year,max\_obs]$,\
+where $max\_obs$ is the maximum number observations in any of the $n\_year$ years. The number of observations each year (the lengths of valid data in each row of the ragged array) is a vector $n\_obs\_year[n\_year]$, so the data in year $i$ is $y[i, 1:n\_obs\_year[i]]$.
+
+The model for error structure of the observations is critical to understanding how model predictions fit observations. In the simulated data, sampling error is a fixed percentage of the observation, one might say an observations was plus or minus 20%. Thus the error is multiplicative not additive. $y_{obs}=y\times \mathcal{N}(1,\sigma)$ not $y_{obs}=y + \mathcal{N}(0,\sigma)$. In that case an observation $y_{obs}$ of 100 spawners $y_{true}$ has a 68% chance of being between 80 to 120, $\mu \times(\pm \ \mathcal{N}(1,\sigma))$, and similarly for an observation of 100,000: 80,000 to 120,000. This is the same as saying the sampling distribution for an observation is lognormal.
+
+````{=tex}
+```{=tex}
+\begin{equation*} \begin{aligned}
+y_{obs} &=\text{rlnorm}(\text{log}(y),\sigma) \\
+ &= (1/y) e^{\mathcal{N}(\text{log}(y),\sigma)}
+\end{aligned} \end{equation*}
+```
+````
+
+This is coded as
+
+| n = n_obs_year\[year\];
+| y_obs\[1:n\] \~ lognormal(log(y_pred\[year,1:n\]), sigma); // relative error
+
+where *y_pred* is a ragged array.
+
+# Simulated Data
+
+Derived from *Simulate Spawners.qmd*, but number and dates for observations vary by year. Just one river.
+
+## Parameters for simulating data
+
+Starting with four years of spawner abundance, subsequent abundances are derived from $prod\equiv$ **juveniles per spawner** (plus variability), apportioning juveniles to life history fractions, and $mort\equiv$ **survival of smolts to adult returns** SAR. The initial years are random lognormal: $\text{rlnorm}(4, \text{log}(1e4), 1)$ .
+
+```{r}
+#| label: constants
+# Set constants for simulation.
+n_years = 20
+n_obs_min = 4  # lower limit number of samples each year
+n_obs_max = 10 # upper limit number of samples each year
+mort_min = 0.01; mort_max = 0.15 # uniform random survival from juv to spawner
+prod = 1/((mort_min + mort_max) /2)  # juveniles per spawner, inverse of mean mortality.
+abund_mu = 1e4;   # mean to initialize first four years spawner abundance
+abund_sigma = 1e4;  # sd to initialize
+LH_fresh = 0.8            # Life History: frac smolts 1.x; frac 2.x = 1-LH_fresh
+LH_salt = c(0.2,0.6,0.2)  # Life History: frac spawners x.1, x.2, x.3 sea years
+# mean day that spawners enter spawning grounds over all years 
+mu_timing = 300  # mean date spawners enter spawning grounds over all years
+sigma_timing = 5  # spread for mean entry date. range ~20 days
+# mean spread in time spawners entering over all years and spread for this mean spread
+mu_spread = 7 # mean of spread in days for spawners entering. 95% within 28 days
+sigma_spread = 1 # spread in year, between years. 95% are 4(7 +/- 2*sigma_spread), 20 to 36 
+    # check max range of spawning
+    extremes = c( mu_timing - 2*sigma_timing - (mu_spread + 2*sigma_spread),
+                  mu_timing + 2*sigma_timing + (mu_spread + 2*sigma_spread) )
+    cat('extreme days:', extremes[1],'to',extremes[2],'range:',extremes[2]-extremes[1],'\n')
+sigma_prop=0.15 # sampling error, proportional to abundance, % accuracy, where % is one stdev.
+
+cat("\n Constants", 
+    "\n n_years:", n_years, '  n_obs_min:', n_obs_min, '  n_obs_max:',n_obs_max,
+    "\n prod:", prod, "  mort_min:", mort_min, "  mort_max:", mort_max,
+    "\n abund__mu:",abund_mu,  " abund_sigma:",abund_sigma,
+    "\n LH_fresh:",LH_fresh, "  LH_salt:",LH_salt,
+    "\n mu_timing:",mu_timing,    "  sigma_timing:", sigma_timing,
+    "\n mu_spread:",mu_spread,  "    sigma_spread:", sigma_spread,
+    "\n residence:", residence,
+    "\n sigma_prop:", sigma_prop, '\n')
+ 
+```
+
+### Apply Parameters
+
+Derive resulting constants and inputs to simulation model.
+
+```{r}
+#| label: apply
+# apply constants  
+Trunc_rnorm = function (n, m=0, s=1, lowest=-Inf, highest=Inf){
+    a = numeric(n)  # zeros
+    j = rep(TRUE, n)  # which elements in a to replace, start with all.
+    while(sum(j) > 0){
+    a = c(a[!j], rnorm(sum(j), m, s) ) # replace with random draws
+    j= a < lowest | a > highest # find those out of range
+    }
+    return(a)
+   # Trunc_rnorm(n=10, m=10, s=5, lowest=0) # test 
+}
+
+mort =   runif(n_years, mort_min, mort_max ) # SAR, entry year only
+timing = rnorm(n_years, mu_timing, sigma_timing) %>% round(0) 
+spread = rnorm(n_years, mu_spread, sigma_spread) %>% round(1) 
+day_min = min(timing) - 2* max(spread) %>% as.integer()
+day_max = max(timing) + 2* max(spread) %>% as.integer()
+n_days = 1+ day_max - day_min
+abund = numeric(n_years) # 4 years spawner abundance to start popn dynamics
+abund[1:4] = Trunc_rnorm(n=4, abund_mu, abund_sigma, lowest=1000) %>% round(0) 
+#abund[1:4] = rlnorm(4, log(abund_mu), log_abund_sigma) %>% round(0) # start for sim
+cat("\n Patterns from constants:", 
+    '\n day_min:', day_min, '  day_max:', day_max, '  n_days:',n_days, 
+    '\n mort each year: \n',    round(mort,2),
+    '\n timing each year: \n',  timing, 
+    '\n spread each year: \n',  spread, 
+    '\n initial abundance: \n', abund[1:4], '\n')
+```
+
+## A Model of Salmon Population Dynamics
+
+Starting with 4 years of spawner abundance values (random, from parameters), generate more years of spawner abundance. The age composition of spawners is available from this, possibly for spawner residence time as a function of size or age. Survival from smolts to spawners is simplistic in the version.
+
+```{r}
+#| label: pop_dyn
+# a function to generate spawner abund each year.
+Pop_dyn = function(spawners, LH_fresh, LH_salt, prod, mort){
+# length of spawners sets length of result. NA after first 4 years. 
+# abundance is total spawner population abundance, ages merged. 
+# calculate returns from spawners for an additional 3 years. 
+    # if 20 years of spawners, year 17 is last addition to year via returns age 1.1 
+    # but year 17 calculations produce returns age 2.3 for year 23. 
+    # truncate before return    
+    n_years= length(spawners)
+    abundance = numeric(n_years+3) 
+# transfer starting values for spawners
+    abundance[1:4]= spawners [1:4] 
+# abundance[4] is increased by returns 1.1 from spawners[1]
+# if n_year = 20, last spawners useful is year 17
+    for (y in 1:(n_years-3)) {  
+        juv=abundance[y]*prod 
+# apportion to freshwater duration, one or two years
+# assign mortality according to ocean entry year
+        age_1x = juv *    LH_fresh  * mort[y+2]
+        age_2x = juv * (1-LH_fresh) * mort[y+3]
+# apportion to saltwater duration, one, two, or three years
+    # age_11 = age_1x * LH_salt[1]
+    # age_12 = age_1x * LH_salt[2]
+    # age_13 = age_1x * LH_salt[3]
+    # age_21 = age_2x * LH_salt[1]
+    # age_22 = age_2x * LH_salt[2]
+    # age_23 = age_2x * LH_salt[3]
+        abundance[y+3] %<>% + (age_1x * LH_salt[1])  # age_11  
+        abundance[y+4] %<>% + (age_1x * LH_salt[2] + age_2x * LH_salt[1]) # 1.2+2.1
+        abundance[y+5] %<>% + (age_1x * LH_salt[3] + age_2x * LH_salt[2]) # 1.3+2.2
+        abundance[y+6] %<>% + (age_2x * LH_salt[3])  # age_23
+    }
+    return(abundance[1:n_years]) # truncated
+}
+```
+
+## Resulting Population Dynamics
+
+```{r}
+#| label: test_pop_dyn
+abund = Pop_dyn(abund, LH_fresh, LH_salt, prod, mort)
+y_max=1.1*max(abund)
+plot_dat= data.frame(Year=1:n_years, Spawners = abund)
+ggplot(data=plot_dat, aes(Year, Spawners)) + theme_bw()+
+    coord_cartesian(xlim=c(0,n_years+1), ylim=c(0,y_max), expand=FALSE) +
+    geom_line() + geom_point()
+
+```
+
+## Spawners observed with sampling error
+
+### Abundance
+
+Spawner abundance each year is converted to spawner entry to spawning grounds as a cumulative normal distribution.
+
+First, the model of spawner abundance for observations days. It is not necessary to determine the integral of the difference of two cumulative probability distributions. This is simply $A_t=\mathcal{N}(t,\mu,\sigma) - \mathcal{N}(t,\mu+\tau,\sigma))$ where $\tau$ is the lag, the residence time, between a spawner entering and exiting. For realistic values of $\sigma \text{ and }  \tau, \ A_t$ is a normal distribution of live spawner abundance by days, the basis for observations. The sum of this abundance will be the number of spawners entering multiplied by the residence time. This in in accordance with the calculation of AUC, where the cumulative abundance of spawners (by linear interpolation) has to be corrected by the residence time. But at any instant *t*, the number of spawner present is $A_t.$
+
+```{r}
+#| label: spawner_presence
+Presence = function(days, mu, sigma, residence){
+    a = (pnorm(days,mu,sigma) - pnorm(days,mu+residence,sigma))
+    return(a)
+}
+#presence= 100* Presence( days=c(14,17,20,23,26,29,32), mu=20, sigma=4, residence= 6); round(presence,0)
+#  7 21 43 55 43 21  7
+# sum(presence*3)/6
+#  98.64256  # this is AUC (without bracketing days of zero fish)
+```
+
+### Sampling Days (irregular)
+
+Apply the Presence() function and select values on sampling days, then observations with multiplicative sampling error of those values.\
+Three functions are required:
+
+1.  **how many observations?** For each year, a random uniform integer between *n_obs_min* and *n_obs_max*, say 3 to t0.
+
+2.  **Draw_days()** generates the dates for that number of observations each year, within a bounded range, *day_min* to *day_max*. These are is random draws from a truncated normal distribution: a *while loop* replaces values out of range.
+
+3.  **Sampling()** applies the preceding functions, but replaces consecutive days. That is done by calling Draw_days() for trial replacements.
+
+```{r}
+#| label: f_sampling
+#| 
+  Draw_days = function (n, mu_timing, mu_spread, widen=1, day_min, day_max){
+    a = rnorm(n, mu_timing, mu_spread*widen) %>% 
+        sort  %>% round(0);  # cat('a1    ',a,'\n')
+    # replace draws outside day_min to day_max   
+    while ( ((min(a) < day_min) | (max(a) > day_max)) == TRUE){
+        j=which( (a < day_min) | (a > day_max) )
+        a = c(a[-j], rnorm(length(j), mu_timing, mu_spread*widen)) %>% 
+        sort  %>% round(0);  # cat('a2    ',a,'\n')
+    }
+  return(a)
+  }
+
+Sampling = function(n_obs_min,n_obs_max,day_min, day_max, mu_timing, mu_spread ){
+# generate number of samples, random uniform.
+# generate dates for these samples within a bounded range of days.
+# these days cannot be consecutive. min gap is 1 days.
+
+# get number of days 
+  n = runif(1,n_obs_min,n_obs_max) %>% round(0) %>% as.integer
+# get dates  
+  a = Draw_days(n, mu_timing, mu_spread, widen=2, day_min, day_max) 
+  # cat('a final:',a,'\n')
+# elimate same or consecutive days
+  while (1 >= min(a[2:n] - a[1:(n-1)]) ) { # if same or consecutive days
+    # find them
+    j= which ( 1 >= (a[2:n] - a[1:(n-1)]) ) 
+    # create replacements
+    b =  Draw_days(length (j), mu_timing, mu_spread, widen=1, day_min, day_max)    
+    a = c(a[-(j+1)], b) %>% sort # goes to test again in while
+  }    
+  return(a)
+}
+
+```
+
+Applying *Sampling()* for observations dates is the set-up for *Presence()* to provide *y_true*, the number of spawners available on each observation day. Then the true number is subject to proportional sampling error (like 15% accuracy), applied as a random lognormal draw to generate the recorded observation: $y_{obs} = \text{rlnorm}(n,\text{log}(y_{true}), \sigma)$.
+
+The results are stored:
+
+-   **n_obs_year:** a vector with the number of days sampled each year.
+-   **day**: a matrix where each row is the dates of observations for a year. There are n_obs_year\[year\] valid observations, and the remainder of the *n_obs_max* columns are NA. This is a *ragged array.*
+-   **y_true**: a matrix corresponding to *day*.
+-   **y_obs**: a matrix corresponding to *day*.
+
+```{r}
+#| label: obs
+day = y_obs = y_true = matrix(0.0, n_years, n_obs_max)
+n_obs_year = numeric(n_years)
+
+for (year in 1:n_years){ 
+    a = Sampling(n_obs_min,n_obs_max,day_min,day_max, mu_timing, mu_spread ) # samples this year. SORTED.
+    n_obs_year[year] = n = length(a)
+    day[year, 1:n] = a     # remainder of this row in the array is NA
+# find the spawner density on those days
+    presence = abund[year] * Presence(a,timing[year],spread[year],residence);
+    y_true[year,1:n ] = round(presence,0) # true count
+}
+
+# sampling error is 15%, or at least, sigma in lognormal is 0.15 
+for(year in 1:n_years){
+    n = n_obs_year[year]
+    #y_obs[year, 1:n] = exp(rnorm(n, log(y_true[year, 1:n]),0.15))
+    y_obs[year, 1:n] = rnorm(n, log(y_true[year, 1:n]), 0.15) %>% exp %>% floor
+}
+```
+
+## Plot obs vs true
+
+```{r}
+#| label: obs_true
+#| warning: false
+Ragged_2_Vector = function(a, b){
+# a is a ragged matrix or array, data does not fill rows, remainder is NA
+# b is the length of data for each row. So b has length nrow(a)
+  n_rows = nrow(a) 
+  x= numeric(sum(b)) 
+  k1=0;k2=0;
+  for(j in 1:n_rows){
+    k1=k2+1
+    k2=k2+b[j]
+    x[k1:k2]=a[j,1:b[j] ]
+  }
+  return(x)
+}
+Repeated = function(a,b){
+    # repeats each element of a according to corresponding element in b
+  if(length(a) != length(b)) stop('Error in Repeated: lengths differ')
+  x= numeric(sum(b)) 
+  k1=0;k2=0;
+  for (j in 1:length(a)) {
+    k1=k2+1
+    k2=k2+b[j]
+    x[k1:k2]= rep(a[j], b[j])
+  }
+  return(x)
+}
+plot_dat = data.frame(
+    year =   Repeated(2001:(2000+n_years), n_obs_year),
+    day =    Ragged_2_Vector(day, n_obs_year),
+    y_true = Ragged_2_Vector(y_true, n_obs_year),
+    y_obs =  Ragged_2_Vector(y_obs, n_obs_year) )
+# year day y_true y_obs
+# 2001 297   1136  1250 ... for sum(n_obs_year) rows.
+
+theme_SAA <- theme_set(theme_bw()) 
+theme_replace(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linetype = "dotted", colour = "black", linewidth = 0.2) ) 
+
+# theme_set(theme_bw+ theme(
+#     panel.grid.minor = element_blank(),
+#     panel.grid.major = element_line(linetype = "dotted") ) )
+
+p1=ggplot(plot_dat, aes(y_true, y_obs) ) + # theme_bw() +
+    geom_point() + geom_abline(slope=1, intercept=0) +
+    labs(title='Linear', x='Spawners',y='Estimates')
+p2=ggplot(plot_dat, aes(y_true, y_obs) ) + # theme_bw() +
+    geom_point() +
+    scale_x_log10() + scale_y_log10() +
+    geom_abline(slope=1, intercept=0)+
+    labs(title='Logarithmic', x='Spawners',y='')
+#  coord_trans(x = "log10", y = "log10") 
+p1 + p2 
+
+```
+
+## Plot spawner timing by year
+
+Examine the normal distributions of spawner timing by years. This is the pattern without annual abundance of spawners.
+
+```{r}
+#| label: spawner_timing
+# generate underlying spawner density for all days all years
+# needs year, day, y_true
+n = (day_max-day_min)+1  # number of days simulated
+all_days=data.frame(
+    year=rep( 2001:(2000+n_years), each=n),
+    day=rep(day_min:day_max, n_years), 
+    y=NA)
+k1=0
+for(year in 1:n_years){
+  k1=k1+1; k2 = (k1+n)-1
+  all_days[k1:k2, 3] = abund[year]* 
+    Presence(day_min:day_max,timing[year],spread[year],residence);
+  k1=k2
+}
+
+
+y_max = 1.1* max(plot_dat[,3:4])
+ggplot(plot_dat, aes(day,y_obs)) + # theme_bw() +
+    geom_point(size=0.5) +
+    geom_line(data=all_days, mapping=aes(day,y), linewidth=0.2) +
+    facet_wrap(year~.) +
+        labs(x="Day of the Year",y="Live Spawners",title='Simulated Observations') 
+ggsave('./images/simulated_observations.png', height=7,width=5.5)
+
+```
+
+## Data as List for Stan
+
+```{r}
+#| label: stan_dat
+# //---- level 2 ---- prior knowledge PDDs of parameters ----
+#   timing            ~ normal(prior[1], prior[2]);
+#   spread            ~ normal(prior[3], prior[4]);
+#   run               ~ normal(prior[5], prior[6] );
+# //---- level 1 ---- prior knowledge of PDDs of parameters ----
+#   year_timing       ~ normal(0,prior[7]);  // effect: plus or minus
+#   year_spread       ~ normal(0,prior[8]);  // effect: plus or minus
+#   residence         ~ normal(prior[9],prior[10]);
+#   sigma             ~ cauchy(prior[11], prior[12]); # normal, additive
+prior = numeric(12)
+prior[1:2]   = c(mu_timing, sigma_timing)
+prior[3:4]   = c(mu_spread, sigma_spread)
+prior[5:6]   = c(abund_mu, abund_sigma)  # for normal, not log-normal
+prior[7:8]   = c(sigma_timing, sigma_spread)
+prior[9:10]  = c(mu_residence, sigma_residence)
+prior[11:12] = c(cauchy_loc = 1000, cauchy_scale = 500) 
+names(prior) = c('mu_timing','sigma_timing','mu_spread','sigma_spread', 'abund_mu','abund_sigma','sigma_timing','sigma_spread','mu_residence', 'sigma_residence','cauchy_loc','cauchy_scale')
+cat('\nprior:\n\n');  print(prior)
+
+
+# data {
+#   int n_priors;                   // count scalar priors 
+#   vector[n_priors] prior;         // prior knowledge, scalar params
+#   int n_years;                    // count years, rows in matrix 
+#   int max_obs;                    // cols in matrix
+#   int n_obs_year [n_years];       // count obs each year
+#   matrix[n_years, max_obs] day;   // days in years, ragged 
+#   matrix[n_years, max_obs] y_obs; // obs  in years, ragged
+# }  
+dat=list(n_priors= 12, prior=prior, n_years=n_years, max_obs=n_obs_max,
+         n_obs_year=n_obs_year, day=day, y_obs=y_obs)
+cat('\ndat is a list:\n'); str(dat)
+
+```
+
+## Stan Code
+
+The model is a character string. This is checked for syntax by function **stanc().** Upon passing those checks, the result is C+ code. That result is compiled to be part of a Stan model by function **stan_model().** Applying the model to data, "fitting" the model, is a subsequent function **sampling().**
+
+```{r}
+#|label: multi_year_gauss
+#|cache: true
+MultiYearGauss_code <- ' 
+functions {  
+  vector Presence(int n, row_vector days, real abund, real mu, real sigma, real lag ){
+    vector [n] presence; 
+    for (j in 1:n){
+      presence[j] = normal_cdf(days[j], mu,    sigma) - 
+                    normal_cdf(days[j], mu+lag,sigma);
+    }
+    return presence * abund;
+  }
+}
+
+data {
+  int n_priors;                   // count scalar priors 
+  vector[n_priors] prior;         // prior knowledge, scalar params
+  int n_years;                    // count years, rows in matrix 
+  int max_obs;                    // cols in matrix
+  int n_obs_year [n_years];       // count obs each year
+  matrix[n_years, max_obs] day;   // days in years, ragged 
+  matrix[n_years, max_obs] y_obs; // obs  in years, ragged
+}
+parameters { 
+//---- level 2 ----
+  real <lower=0> timing;           // entry mean all years
+  real <lower=0> spread;           // entry spread all years
+  real <lower=0> run_mean;         // spawner abundance mean all years
+//---- level 1 ----
+  vector [n_years] run;            // total spawners. year effect. some negative
+  vector [n_years] year_timing;    // entry mean.     year effect. some negative
+  vector [n_years] year_spread;    // entry spread.   year effect. some negative
+  real <lower=0> residence;        // duration on spawning site
+  real <lower=0> sigma;            // stdev of normal residuals 
+}
+model {
+//---- local variables ----
+  vector[max_obs] y_pred;  // predicted within a year
+  real t;                  // predicted timing, overall + year effect
+  real s;                  // predicted spread, overall + year effect
+  real r;                  // predicted run,    overall + year effect
+  int  n;                  // count obs in a year for ragged arrays
+//---- level 2 ---- prior knowledge PDDs parameters ----
+  timing            ~ normal(prior[1], prior[2]);
+  spread            ~ normal(prior[3], prior[4]);
+  run_mean          ~ lognormal(log(prior[5]), 1 );
+//---- level 1 ---- prior knowledge PDDs parameters ----
+  run               ~ normal(0,prior[6]);  // effect: plus or minus
+  year_timing       ~ normal(0,prior[7]);  // effect: plus or minus
+  year_spread       ~ normal(0,prior[8]);  // effect: plus or minus
+  residence         ~ normal(prior[9],prior[10]);
+  sigma             ~ cauchy(prior[11], prior[12]); # normal, additive
+//---- predict from sample of parameters ---- 
+  for (year in 1:n_years){
+    t = timing   + year_timing[year];  // predicted timing this year
+    s = spread   + year_spread[year];  // predicted spread this year
+    r = run_mean + run[year];          // predicted run this year 
+    n = n_obs_year[year];              // count obs this year
+    y_pred[1:n] = Presence(n,day[year,1:n],r,t,s,residence);  
+//---- accumulate probability of data given prediction ----
+    y_obs[year, 1:n] ~ normal(y_pred[1:n], sigma);  // vectorized
+  }    
+} '
+
+stanc_ret <- stanc(model_code=MultiYearGauss_code) # check fussy syntax, compile 
+MultiYearGauss <- stan_model (stanc_ret=stanc_ret) # create model
+```
+
+# Fit Model to Observations
+
+*No prediction, no science.*
+
+$y_{obs}$ is from imprecise sampling of simulated $y_{true}$, and applied to challenge predictions.
+
+```{r}
+#|label: sampling_MultiYearGauss
+#|cache: true
+# library(rstan)
+s1 <- sampling( MultiYearGauss, data=dat, 
+        chains=4, iter=8000, warmup=2000, cores=4)
+
+```
+
+### Marginal Distributions
+
+```{r}
+#|label: prt_sampling_s1
+print (s1)
+plot(s1, pars=c('run'))
+plot(s1, pars=c('year_timing'))
+plot(s1, pars=c('year_spread'))
+```
+
+### Compare fitted parameters to original
+
+```{r}
+#| label: compare
+a=s1@.MISC[["summary"]][["msd"]]  # mean and sd from fit
+a = round(a,2)
+a1[1:2] = c(mu_timing,mu_spread)
+a1[3:22] = abund
+a1[23:42] = timing-mu_timing  # effect by year
+a1[43:62] = spread - mu_spread # effect by year
+a1[63] = residence
+a1[64:65] = NA
+a1= round(a1,1)
+a = cbind (a, a1) ; rm(a1);
+print(a)
+
+```
+
+### Save Results
+
+```{r}
+#| label: stash
+#| eval: false
+# saveRDS( obs_sampl, './results/obs_sampl.Rdata')
+# saveRDS( obs_true, './results/obs_true.Rdata')
+```

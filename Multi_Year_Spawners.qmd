@@ -15,7 +15,15 @@ execute:
 #| output: false
 library(rstan);library(magrittr);library(ggplot2); 
 library(patchwork); library(knitr)
-rstan_options(auto_write = TRUE) # avoid recompiling if not changed
+rstan_options(auto_write = TRUE) # do not recompile code not changed
+
+theme_SAA = function(){
+  theme_set(theme_bw()) 
+  theme_replace(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(
+        linetype='dotted',colour ='grey', linewidth=0.2) ) 
+}
 ```
 
 # Intro
@@ -26,9 +34,103 @@ rstan_options(auto_write = TRUE) # avoid recompiling if not changed
 
 **Simulation:** Derived from *Simulate Spawners*. This version creates observation dates that vary by year.
 
-# Stan code
+# Model
 
-This will fit a different $abundance$ of spawners the Gauss ("normal") probability density distribution (PDD), $\mathcal{N}(\mu,\sigma)$, to spawner counts each year. This is a multi-level model: information is shared between years: samples for total **abundance** in one year are draws from a fitted PDD of abundances. That improves the precision of that year's abundance PDD (the fit) with information from the other years. Similarly for the varying location and spread of **spawner entry time** in every year: these parameters are sampled from a fitted PDD of those annual values.
+This model will predicted the *run* (abundance) each year of spawners from the counts of spawners (observations with sampling error) each year. Runs are simulated from spawner population dynamics including productivity (smolts/spawner), age compostion of smolts and adults, and smolt survival by ocean entry year. Within a year, spawners enter according to annually varying entry time and spread, and stay for a fixed residence time.
+
+> "In general, older and larger wild Atlantic salmon return to freshwater to spawn earlier in the season than younger and smaller salmon, and female salmon return earlier in the season than males (e.g. Foldvik et al., 2024; Harvey et al., 2017; Jokikokko et al., 2004; Niemelä et al., 2006; Shearer, 1990)."\
+> – Miettinen, A., Romakkaniemi, A., Dannewitz, J., Pakarinen, T., Palm, S., Persson, L., Östergren, J., Primmer, C.R., and Pritchard, V.L. 2024. Temporal allele frequency changes in large-effect loci reveal potential fishing impacts on salmon life-history diversity. Evolutionary Applications **17**(4): e13690. doi:[10.1111/eva.13690](https://doi.org/10.1111/eva.13690).
+
+This is a multi-level regression (**MLR**), where level 1 parameters vary by year and share information through a distribution fitted to each level 1 parameters. That distribution is the level 2 parameters and the basis for sampling (fitting) the PDDs at level 1. Level 2 is then the overall pattern across years and level 1 is the change from that each year. information is shared between years: trial values for abundance each year are draws from a fitted PDD of abundances (with prior knowledge for that PDD included). That improves the precision of an estimate for a year's run by using information from the other years; estimates for poorly observed years will tend toward the mean run for all years. Similarly for the varying time and spread of **spawner entry** in every year: these parameters are sampled from a PDD fitted to those annual values.
+
+"When data sizes are small, parameter estimation can be stabilized and sharpened by providing **hierarchical priors**. With hierarchical priors, the data determines the amount of *partial pooling* among the groups. The only drawback is that if the number of groups is small, it can be hard to fit these models without strong hyperpriors." "Priors on priors, also known as *hyperpriors*, should be treated the same way as priors on lower-level parameters in that **as much prior information as is available should be brought to bear.** "\
+– Stan Development Team. 2024. Stan User’s Guide Version 2.35
+
+For example, the mean (with standard deviation) of spawner run size over all years, *run*, is level 2 and never a negative number. The prior for the distribution for samples of *run* is *lognomal(run_mu, run_sigma)*. The difference from that overall mean in a single year is another mean *run_year* with prior *lognomal(run, run_year_sigma)*. The result of fitting a level estimate of mean run, provides information to the level 1 is also constrained to be non-negative.
+
+## Parameters
+
+The parameters – or the population dynamics underlying annual spawner abundance, for the patterns of spawner abundance within a year, and for the prior knowledge and fitted parameters of a statistical model – could be those of the following table.
+
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| Parameter Description                                                                                                                                                                                                                                                                                                                                        | Code\                   | Math\                     |
+|                                                                                                                                                                                                                                                                                                                                                              | Variables               | Symbol                    |
++==============================================================================================================================================================================================================================================================================================================================================================+=========================+===========================+
+| **Run**. *Multi-level.* Abundance, total number of spawners. Multiple ages lumped. There is a mean (mu) and stdev (sigma) for each. Runs are simulated, but four starting values are required:\                                                                                                                                                              | Simulation:\            | $r_\mu,r_\sigma$,\        |
+| *Trunc_rnorm(n=4, run_mu, run_sigma, lowest=1000).\                                                                                                                                                                                                                                                                                                          | run_init_mu\            | $r_{\mu,y},r_{\sigma, y}$ |
+| *The year effect for run size is centered, prior:\                                                                                                                                                                                                                                                                                                           | run_init_sigma\         |                           |
+| *N(0,run_year_sigma).*\                                                                                                                                                                                                                                                                                                                                      | run\[year\]\            |                           |
+| The predicted run is\                                                                                                                                                                                                                                                                                                                                        | MLR level 2:\           |                           |
+| *r = run + run_year\[year\]*.                                                                                                                                                                                                                                                                                                                                | run_mu\                 |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | run_sigma\              |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | MLR level 1:\           |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | run_year_sigma \[year\] |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Mortality.** Survival of juvenile salmon that will enter the ocean (smolts) to become adult return (SAR). Applied simplistically to just the ocean entry year of a salmon, irrespective of freshwater age and duration of marine life. Varies by year, uniform random from mort_min to mort_max.                                                           | mort_min\               | $m_y$                     |
+|                                                                                                                                                                                                                                                                                                                                                              | mort_max\               |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | mort \[year\]           |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Presence.** The number of salmon on the spawning ground, available to be observed. Derived from the temporal pattern of salmon entering, then residence time before leaving (death or emigration), and the abundance of spawners each year. There are three version of this: simulated, the simulated observed with error, and prediction of the observed. | y_true \[year,day\]\    | $Y_{y,d}$                 |
+|                                                                                                                                                                                                                                                                                                                                                              | y_obs \[year,day\]\     |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | y_pred \[year,day\]     |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Entry Timing**. *Multi-level.* The temporal pattern of spawners entering the spawning ground.\                                                                                                                                                                                                                                                             | Simulation:\            |                           |
+| Level 2, the background, is timing_mu and spread_mu. These are used generate vectors of timing\[year\] and spread\[year\] that are used to simulate spawner presence. The prior knowledge for the level 2 PDD for those is timing_sigma and spread_sigma.\                                                                                                   | timing\[year\]\         |                           |
+| For Level 1, the prior knowledge for year effects is timing_year_sigma and spread_year_sigma.                                                                                                                                                                                                                                                                | MLR level 2:\           |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | timing_mu\              |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | timing_sigma\           |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | MLR level 1:\           |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | timing_year_sigma       |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Entry Spread**. *Multi-level.*                                                                                                                                                                                                                                                                                                                             | Simulation:\            |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | spread \[year\]\        |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | MLR level 2:\           |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | spread_mu\              |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | spread_sigma\           |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | MLR level 1:\           |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | spread_year_sigma       |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Residence**. Duration, in days, of a spawner on the spawning ground (observation place). Initially constant across years and days within years. This is known to vary by fish sex (males stay longer), and timing (early arrivals stay longer). Likely also varies by fish size (age) and by preceding and present habitat conditions.                     | Simulation:\            | $\lambda$                 |
+|                                                                                                                                                                                                                                                                                                                                                              | residence\              |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | MLR level 1 prior:\     |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | residence_mu\           |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | residence_sigma         |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Day.** Day of the solar year, ecological year.\                                                                                                                                                                                                                                                                                                            | day                     | $d$                       |
+| Day 0 is winter solstice, Medieval: December 21. January 1: Day 10, Spring equinox: 90, Summer solstice: 181, Fall equinox: 275.\                                                                                                                                                                                                                            |                         |                           |
+| <https://www.timeanddate.com/calendar/seasons.html>\                                                                                                                                                                                                                                                                                                         |                         |                           |
+| prev_days = 0 31 59 90 120 151 181 212 243 273 304 334\                                                                                                                                                                                                                                                                                                      |                         |                           |
+| June 20 = prev_days\[6\]+ 20 +10 = 181\                                                                                                                                                                                                                                                                                                                      |                         |                           |
+| Earth orbits Sol in an ellipse: Spring to Fall is \~ 5 days longer than Fall to Spring. Equinoxes and solstices are not 365.256363/4 days apart, not solar days 91.3125, 182.6250, 273.9375                                                                                                                                                                  |                         |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Observation**. The days, each year, when a human (or ?) counted spawners.\                                                                                                                                                                                                                                                                                 | obs\[day, year\]\       | $O_{d,y}$                 |
+| Present schedule: random number of observations at random dates each year; constrained to avoid sequential days.\                                                                                                                                                                                                                                            | n_obs_max\              |                           |
+| Alternative: Start on the same day every year (Fall equinox + 10 days?) and repeat as Monday, Wednesday, Friday (14 obs/month):\                                                                                                                                                                                                                             | n_obs_min\              |                           |
+| 285+ c(0,2,4,7,9,11,14,16,18,21,23,25,28,30)\                                                                                                                                                                                                                                                                                                                | day_min\                |                           |
+| = 285 287 289 292 294 296 299 301 303 306 308 310 313 315.\                                                                                                                                                                                                                                                                                                  | day_max\                |                           |
+| or Monday, Thursday (10 obs/month):\                                                                                                                                                                                                                                                                                                                         | n_days                  |                           |
+| 285+ c(0,3,7,10,14,17,21,24,28,31)\                                                                                                                                                                                                                                                                                                                          |                         |                           |
+| = 285 288 292 295 299 302 306 309 313 316.\                                                                                                                                                                                                                                                                                                                  |                         |                           |
+| The display of sampling involves an x-axis range, *day_min* to *day_max*, a total of *n_days*; calculated from entry parameters.                                                                                                                                                                                                                             |                         |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Sampling Error**. The precision of an observation is Poisson (variance = mean) or neg.binomial). Results are non-negative integers and sampling error is proportional to spawner abundance (multiplicative, error is a percent). Then an observation of an abundance is $O_{y,d}=rlnorm(log(A_{y,d}), \sigma_O)$ where $\sigma_O\approx 0.15$.\            | sigma_obs               | $\sigma_O$                |
+| qlnorm(c(0.025,0.25,0.75,0.975),log(1e4), 0.25)\                                                                                                                                                                                                                                                                                                             |                         |                           |
+| 6,126 8,448 11,836 16,323 \# 95% and 50% CIs                                                                                                                                                                                                                                                                                                                 |                         |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Productivity**. The ratio of juveniles to spawners, on the order of 70. The juveniles become returning adults after 1 or 2 years freshwater, and 1 to 3 years saltwater. This is a fixed value in the present model. This model adds a lognormal random component to mean productivity.                                                                    | prod,\                  | $P, \sigma_P, P_y$        |
+|                                                                                                                                                                                                                                                                                                                                                              | prod_sigma,\            |                           |
+|                                                                                                                                                                                                                                                                                                                                                              | prod_year               |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+| **Life History.** Apportions age at return (fresh then salt). These do not vary by year. Organized as (1) hist_fresh: probabilities for smolts being 1 or 2 lake years (1.x, 2.x) so a fraction emigrate later and encounter different SAR, then (2) hist_salt: 1, 2, or 3 marine years. Example:\                                                           | hist_fresh,\            | $h_f,h_s$                 |
+| LH for ages (1.1,1.2,1.3), (2.1,2.2,2.3)\                                                                                                                                                                                                                                                                                                                    | hist_salt               |                           |
+| = hist_fresh\*hist_salt\                                                                                                                                                                                                                                                                                                                                     |                         |                           |
+| = c(0.8\*c(0.2,0.6,0.2), 0.2\*c(0.2,0.6,0.2))\                                                                                                                                                                                                                                                                                                               |                         |                           |
+| = (0.6 0.48 0.16), (0.04 0.12 0.04). Sum = 1.                                                                                                                                                                                                                                                                                                                |                         |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+|                                                                                                                                                                                                                                                                                                                                                              |                         |                           |
++--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+-------------------------+---------------------------+
+
+: Table 1. Parameters for simulated observations of spawner abundance.
 
 The format for the data input to the Stan model is new. There is a different number of observations each year. The dates for those observations vary each year. The count $y_{true}$ of live spawners, and the day of the year $day$ of that count, are in two ragged arrays: $day[n\_year,max\_obs]$and $y_{true} [n\_year,max\_obs]$,\
 where $max\_obs$ is the maximum number observations in any of the $n\_year$ years. The number of observations each year (the lengths of valid data in each row of the ragged array) is a vector $n\_obs\_year[n\_year]$, so the data in year $i$ is $y[i, 1:n\_obs\_year[i]]$.
@@ -55,43 +157,57 @@ where *y_pred* is a ragged array.
 
 Derived from *Simulate Spawners.qmd*, but number and dates for observations vary by year. Just one river.
 
-## Parameters for simulating data
+## Set Parameters
 
 Starting with four years of spawner abundance, subsequent abundances are derived from $prod\equiv$ **juveniles per spawner** (plus variability), apportioning juveniles to life history fractions, and $mort\equiv$ **survival of smolts to adult returns** SAR. The initial years are random lognormal: $\text{rlnorm}(4, \text{log}(1e4), 1)$ .
 
 ```{r}
 #| label: constants
-# Set constants for simulation.
-n_years = 20
-n_obs_min = 4  # lower limit number of samples each year
-n_obs_max = 10 # upper limit number of samples each year
-mort_min = 0.01; mort_max = 0.15 # uniform random survival from juv to spawner
+# Set constants for simulation. run, timing, spread.
+n_years = 20     # N rows in data
+n_obs_max = 10   # upper limit number of samples each year. N columns in data.
+n_obs_min = 4    # lower limit number of samples each year
+mort_min = 0.01  # uniform random survival from juv to spawner
+mort_max = 0.15  # uniform random survival from juv to spawner
 prod = 1/((mort_min + mort_max) /2)  # juveniles per spawner, inverse of mean mortality.
-abund_mu = 1e4;   # mean to initialize first four years spawner abundance
-abund_sigma = 1e4;  # sd to initialize
-LH_fresh = 0.8            # Life History: frac smolts 1.x; frac 2.x = 1-LH_fresh
-LH_salt = c(0.2,0.6,0.2)  # Life History: frac spawners x.1, x.2, x.3 sea years
-# mean day that spawners enter spawning grounds over all years 
-mu_timing = 300  # mean date spawners enter spawning grounds over all years
-sigma_timing = 5  # spread for mean entry date. range ~20 days
-# mean spread in time spawners entering over all years and spread for this mean spread
-mu_spread = 7 # mean of spread in days for spawners entering. 95% within 28 days
-sigma_spread = 1 # spread in year, between years. 95% are 4(7 +/- 2*sigma_spread), 20 to 36 
-    # check max range of spawning
-    extremes = c( mu_timing - 2*sigma_timing - (mu_spread + 2*sigma_spread),
-                  mu_timing + 2*sigma_timing + (mu_spread + 2*sigma_spread) )
-    cat('extreme days:', extremes[1],'to',extremes[2],'range:',extremes[2]-extremes[1],'\n')
-sigma_prop=0.15 # sampling error, proportional to abundance, % accuracy, where % is one stdev.
+run_init_mu = 1e4;     # mean for initial 4 years spawner run, Gaussian
+run_init_sigma = 10000;  # sd to initialize
+run_mu = 1e4;            # prior knowledge of PDD runs
+run_sigma = 5e3;         # prior knowledge of PDD runs
+LH_fresh = 0.8           # frac smolts 1.x;frac 2.x=1-LH_fresh
+LH_salt = c(0.2,0.6,0.2) # frac sea years x.1, x.2, x.3 
+# Spawner entry every year.
+# These are also level 2 parameters in Stan model.
+timing_mu = 300   # mean day spawners enter spawning grounds
+timing_sigma = 5
+timing_year_sigma = 5  # year effect on. range ~20 days: 290,310.
+# mean over all years for spread of spawners entering in a year.
+spread_mu = 7 # mean of spread in days for spawners entering. 95% within 28 days
+spread_sigma = 1
+spread_year_sigma = 1 # year effect on spread.
+residence = 12            # days on spawning ground
+residence_mu = 12         # prior
+residence_sigma = 3       # prior
+sigma_sampling = 0.15     # sampling error, proportional
 
-cat("\n Constants", 
+# check max range of spawning
+extremes = c(timing_mu - 2*timing_sigma - 
+               (spread_mu + 2*spread_sigma),
+             timing_mu + 2*timing_sigma + 
+               (spread_mu + 2*spread_sigma) )
+cat('extreme days:', extremes[1],'to',extremes[2],'range:',extremes[2]-extremes[1],'\n')
+
+cat("\n Scalar Parameters:", 
     "\n n_years:", n_years, '  n_obs_min:', n_obs_min, '  n_obs_max:',n_obs_max,
-    "\n prod:", prod, "  mort_min:", mort_min, "  mort_max:", mort_max,
-    "\n abund__mu:",abund_mu,  " abund_sigma:",abund_sigma,
+    "\n prod:", prod, 
+    "\n  mort_min:", mort_min, "  mort_max:", mort_max,
+    "\n run_init_mu:",run_init_mu,  "  run_init_sigma:",run_init_sigma,
     "\n LH_fresh:",LH_fresh, "  LH_salt:",LH_salt,
-    "\n mu_timing:",mu_timing,    "  sigma_timing:", sigma_timing,
-    "\n mu_spread:",mu_spread,  "    sigma_spread:", sigma_spread,
+    "\n timing_mu:",timing_mu,    "  timing_sigma, year effect:", timing_sigma,
+    "\n spread_mu:",spread_mu,  "  spread_sigma, year effect:", spread_sigma,
     "\n residence:", residence,
-    "\n sigma_prop:", sigma_prop, '\n')
+      "  residence_mu:", residence_mu,"  residence_sigma:", residence_sigma,
+    "\n sigma_prop:", sigma_sampling, '\n')
  
 ```
 
@@ -114,25 +230,26 @@ Trunc_rnorm = function (n, m=0, s=1, lowest=-Inf, highest=Inf){
 }
 
 mort =   runif(n_years, mort_min, mort_max ) # SAR, entry year only
-timing = rnorm(n_years, mu_timing, sigma_timing) %>% round(0) 
-spread = rnorm(n_years, mu_spread, sigma_spread) %>% round(1) 
+timing = rnorm(n_years, timing_mu, timing_sigma) %>% round(0) 
+spread = rnorm(n_years, spread_mu, spread_sigma) %>% round(1) 
 day_min = min(timing) - 2* max(spread) %>% as.integer()
 day_max = max(timing) + 2* max(spread) %>% as.integer()
 n_days = 1+ day_max - day_min
-abund = numeric(n_years) # 4 years spawner abundance to start popn dynamics
-abund[1:4] = Trunc_rnorm(n=4, abund_mu, abund_sigma, lowest=1000) %>% round(0) 
-#abund[1:4] = rlnorm(4, log(abund_mu), log_abund_sigma) %>% round(0) # start for sim
-cat("\n Patterns from constants:", 
+run = numeric(n_years) 
+# initial 4 years of spawner runs, needed to start popn dynamics
+run[1:4] = Trunc_rnorm(n=4, run_init_mu, run_init_mu, lowest=1000) %>% round(0) 
+#run[1:4] = rlnorm(4, log(run_init_mu), 2) %>% round(0) # start for sim
+cat("\n Patterns From Scalar Parameters:", 
     '\n day_min:', day_min, '  day_max:', day_max, '  n_days:',n_days, 
     '\n mort each year: \n',    round(mort,2),
     '\n timing each year: \n',  timing, 
     '\n spread each year: \n',  spread, 
-    '\n initial abundance: \n', abund[1:4], '\n')
+    '\n initial runs: \n', run[1:4], '\n')
 ```
 
-## A Model of Salmon Population Dynamics
+## Salmon Population Dynamics
 
-Starting with 4 years of spawner abundance values (random, from parameters), generate more years of spawner abundance. The age composition of spawners is available from this, possibly for spawner residence time as a function of size or age. Survival from smolts to spawners is simplistic in the version.
+Generate *n_years* of spawner abundance, starting with 4 years random values from parameters. The age composition of spawners is available from this, possibly for spawner residence time as a function of size or age. Survival from smolts to spawners is simplistic in the version.
 
 ```{r}
 #| label: pop_dyn
@@ -176,26 +293,31 @@ Pop_dyn = function(spawners, LH_fresh, LH_salt, prod, mort){
 
 ```{r}
 #| label: test_pop_dyn
-abund = Pop_dyn(abund, LH_fresh, LH_salt, prod, mort)
-y_max=1.1*max(abund)
-plot_dat= data.frame(Year=1:n_years, Spawners = abund)
-ggplot(data=plot_dat, aes(Year, Spawners)) + theme_bw()+
+ run = Pop_dyn(run, LH_fresh, LH_salt, prod, mort)
+y_max=1.1*max(run)
+
+plot_dat= data.frame(Year=1:n_years, Spawners = run)
+ggplot(data=plot_dat, aes(Year, Spawners)) + theme_SAA() +
     coord_cartesian(xlim=c(0,n_years+1), ylim=c(0,y_max), expand=FALSE) +
     geom_line() + geom_point()
 
 ```
 
-## Spawners observed with sampling error
+## Spawner observations with sampling error
 
-### Abundance
+### Spawner Presence
 
-Spawner abundance each year is converted to spawner entry to spawning grounds as a cumulative normal distribution.
+Spawner *run* each year is converted to spawner *presence* each day on the spawning grounds as a cumulative normal distribution of entries by day and corresponding cumulative exits after *residence* days later. These parameters vary by year with the exception of residence
 
-First, the model of spawner abundance for observations days. It is not necessary to determine the integral of the difference of two cumulative probability distributions. This is simply $A_t=\mathcal{N}(t,\mu,\sigma) - \mathcal{N}(t,\mu+\tau,\sigma))$ where $\tau$ is the lag, the residence time, between a spawner entering and exiting. For realistic values of $\sigma \text{ and }  \tau, \ A_t$ is a normal distribution of live spawner abundance by days, the basis for observations. The sum of this abundance will be the number of spawners entering multiplied by the residence time. This in in accordance with the calculation of AUC, where the cumulative abundance of spawners (by linear interpolation) has to be corrected by the residence time. But at any instant *t*, the number of spawner present is $A_t.$
+Typically Gaussian, $G(\mu_{E,y}, \sigma_E)$, with the mean day of entry varying by year but the spread of spawner presence is constant across years. So $T_y=\mu_{E,y} =G(\mu_T, \sigma_T)$ where $\mu_T$ is the mean day across years of the mean day of spawner entry. $E_{y,d}=G(T_y, \sigma_E)$.
+
+First, the model of spawner abundance for observations days. It is not necessary to determine the integral of the difference of two cumulative probability distributions. This is simply $A_t=\mathcal{N}(t,\mu,\sigma) - \mathcal{N}(t,\mu+\tau,\sigma))$ where $\tau$ is the lag, the residence time, between a spawner entering and exiting. At any instant *t*, the number of spawner present is $A_t$, the basis for observations. For realistic values of $\sigma \text{ and }  \tau, \ A_t$ is a normal distribution. The sum of this abundance each day will be the number of spawners entering multiplied by the residence time. This in in accordance with the calculation of AUC, where the cumulative abundance of live spawners (by linear interpolation) has to be corrected by the residence time.
 
 ```{r}
 #| label: spawner_presence
 Presence = function(days, mu, sigma, residence){
+    # pnorm is cumulative probability, 
+    # pnorm( c(-1.96,1.99))= 0.025, 0.975
     a = (pnorm(days,mu,sigma) - pnorm(days,mu+residence,sigma))
     return(a)
 }
@@ -205,7 +327,7 @@ Presence = function(days, mu, sigma, residence){
 #  98.64256  # this is AUC (without bracketing days of zero fish)
 ```
 
-### Sampling Days (irregular)
+### Irregular Sampling Days
 
 Apply the Presence() function and select values on sampling days, then observations with multiplicative sampling error of those values.\
 Three functions are required:
@@ -214,24 +336,24 @@ Three functions are required:
 
 2.  **Draw_days()** generates the dates for that number of observations each year, within a bounded range, *day_min* to *day_max*. These are is random draws from a truncated normal distribution: a *while loop* replaces values out of range.
 
-3.  **Sampling()** applies the preceding functions, but replaces consecutive days. That is done by calling Draw_days() for trial replacements.
+3.  **Sampling()** applies the preceding functions, but replaces consecutive days. That is done by calling Draw_days() for replacement of trial values.
 
 ```{r}
 #| label: f_sampling
 #| 
-  Draw_days = function (n, mu_timing, mu_spread, widen=1, day_min, day_max){
-    a = rnorm(n, mu_timing, mu_spread*widen) %>% 
+  Draw_days = function (n, timing_mu, spread_mu, widen=1, day_min, day_max){
+    a = rnorm(n, timing_mu, spread_mu*widen) %>% 
         sort  %>% round(0);  # cat('a1    ',a,'\n')
     # replace draws outside day_min to day_max   
     while ( ((min(a) < day_min) | (max(a) > day_max)) == TRUE){
         j=which( (a < day_min) | (a > day_max) )
-        a = c(a[-j], rnorm(length(j), mu_timing, mu_spread*widen)) %>% 
+        a = c(a[-j], rnorm(length(j), timing_mu, spread_mu*widen)) %>% 
         sort  %>% round(0);  # cat('a2    ',a,'\n')
     }
   return(a)
   }
 
-Sampling = function(n_obs_min,n_obs_max,day_min, day_max, mu_timing, mu_spread ){
+Sampling = function(n_obs_min,n_obs_max,day_min, day_max, timing_mu, spread_mu ){
 # generate number of samples, random uniform.
 # generate dates for these samples within a bounded range of days.
 # these days cannot be consecutive. min gap is 1 days.
@@ -239,14 +361,14 @@ Sampling = function(n_obs_min,n_obs_max,day_min, day_max, mu_timing, mu_spread )
 # get number of days 
   n = runif(1,n_obs_min,n_obs_max) %>% round(0) %>% as.integer
 # get dates  
-  a = Draw_days(n, mu_timing, mu_spread, widen=2, day_min, day_max) 
+  a = Draw_days(n, timing_mu, spread_mu, widen=2, day_min, day_max) 
   # cat('a final:',a,'\n')
 # elimate same or consecutive days
   while (1 >= min(a[2:n] - a[1:(n-1)]) ) { # if same or consecutive days
     # find them
     j= which ( 1 >= (a[2:n] - a[1:(n-1)]) ) 
     # create replacements
-    b =  Draw_days(length (j), mu_timing, mu_spread, widen=1, day_min, day_max)    
+    b =  Draw_days(length (j), timing_mu, spread_mu, widen=1, day_min, day_max)    
     a = c(a[-(j+1)], b) %>% sort # goes to test again in while
   }    
   return(a)
@@ -269,19 +391,18 @@ day = y_obs = y_true = matrix(0.0, n_years, n_obs_max)
 n_obs_year = numeric(n_years)
 
 for (year in 1:n_years){ 
-    a = Sampling(n_obs_min,n_obs_max,day_min,day_max, mu_timing, mu_spread ) # samples this year. SORTED.
-    n_obs_year[year] = n = length(a)
-    day[year, 1:n] = a     # remainder of this row in the array is NA
+    days = Sampling(n_obs_min,n_obs_max,day_min,day_max, timing_mu, spread_mu ) # samples in one year. SORTED.
+    n_obs_year[year] = n = length(days)
+    day[year, 1:n] = days     # remainder of this row in the array is NA
 # find the spawner density on those days
-    presence = abund[year] * Presence(a,timing[year],spread[year],residence);
+    presence = run[year] * Presence(days,timing[year],spread[year],residence);
     y_true[year,1:n ] = round(presence,0) # true count
 }
 
 # sampling error is 15%, or at least, sigma in lognormal is 0.15 
 for(year in 1:n_years){
     n = n_obs_year[year]
-    #y_obs[year, 1:n] = exp(rnorm(n, log(y_true[year, 1:n]),0.15))
-    y_obs[year, 1:n] = rnorm(n, log(y_true[year, 1:n]), 0.15) %>% exp %>% floor
+    y_obs[year, 1:n] = rnorm(n, log(y_true[year, 1:n]), sigma_sampling) %>% exp %>% floor # as integer counts for Poisson sampling: y_obs ~ Poisson(y_pred)
 }
 ```
 
@@ -323,19 +444,11 @@ plot_dat = data.frame(
 # year day y_true y_obs
 # 2001 297   1136  1250 ... for sum(n_obs_year) rows.
 
-theme_SAA <- theme_set(theme_bw()) 
-theme_replace(
-    panel.grid.minor = element_blank(),
-    panel.grid.major = element_line(linetype = "dotted", colour = "black", linewidth = 0.2) ) 
-
-# theme_set(theme_bw+ theme(
-#     panel.grid.minor = element_blank(),
-#     panel.grid.major = element_line(linetype = "dotted") ) )
-
-p1=ggplot(plot_dat, aes(y_true, y_obs) ) + # theme_bw() +
+theme_SAA()
+p1=ggplot(plot_dat, aes(y_true, y_obs) ) + 
     geom_point() + geom_abline(slope=1, intercept=0) +
     labs(title='Linear', x='Spawners',y='Estimates')
-p2=ggplot(plot_dat, aes(y_true, y_obs) ) + # theme_bw() +
+p2=ggplot(plot_dat, aes(y_true, y_obs) ) + theme_SAA() +
     geom_point() +
     scale_x_log10() + scale_y_log10() +
     geom_abline(slope=1, intercept=0)+
@@ -361,14 +474,14 @@ all_days=data.frame(
 k1=0
 for(year in 1:n_years){
   k1=k1+1; k2 = (k1+n)-1
-  all_days[k1:k2, 3] = abund[year]* 
+  all_days[k1:k2, 3] = run[year]* 
     Presence(day_min:day_max,timing[year],spread[year],residence);
   k1=k2
 }
 
-
+theme_SAA()
 y_max = 1.1* max(plot_dat[,3:4])
-ggplot(plot_dat, aes(day,y_obs)) + # theme_bw() +
+ggplot(plot_dat, aes(day,y_obs)) + #  theme_SAA() +
     geom_point(size=0.5) +
     geom_line(data=all_days, mapping=aes(day,y), linewidth=0.2) +
     facet_wrap(year~.) +
@@ -377,42 +490,97 @@ ggsave('./images/simulated_observations.png', height=7,width=5.5)
 
 ```
 
-## Data as List for Stan
+## Data and Prior Knowledge for Stan Model
+
+Priors.
 
 ```{r}
-#| label: stan_dat
-# //---- level 2 ---- prior knowledge PDDs of parameters ----
-#   timing            ~ normal(prior[1], prior[2]);
-#   spread            ~ normal(prior[3], prior[4]);
-#   run               ~ normal(prior[5], prior[6] );
-# //---- level 1 ---- prior knowledge of PDDs of parameters ----
-#   year_timing       ~ normal(0,prior[7]);  // effect: plus or minus
-#   year_spread       ~ normal(0,prior[8]);  // effect: plus or minus
-#   residence         ~ normal(prior[9],prior[10]);
-#   sigma             ~ cauchy(prior[11], prior[12]); # normal, additive
-prior = numeric(12)
-prior[1:2]   = c(mu_timing, sigma_timing)
-prior[3:4]   = c(mu_spread, sigma_spread)
-prior[5:6]   = c(abund_mu, abund_sigma)  # for normal, not log-normal
-prior[7:8]   = c(sigma_timing, sigma_spread)
-prior[9:10]  = c(mu_residence, sigma_residence)
-prior[11:12] = c(cauchy_loc = 1000, cauchy_scale = 500) 
-names(prior) = c('mu_timing','sigma_timing','mu_spread','sigma_spread', 'abund_mu','abund_sigma','sigma_timing','sigma_spread','mu_residence', 'sigma_residence','cauchy_loc','cauchy_scale')
-cat('\nprior:\n\n');  print(prior)
+#| label: priors_4_stan
+# data # prior knowledge of level 2 distributions.  14 of these.
+#   real run_mu_prior;           // run_mu is a parameter
+#   real run_mu_sigma_prior;     // with a distribution
+#   real run_sigma_prior;        // run_sigma is a parameter
+#   real run_sigma_sigma_prior;  // with a distribution
+#   real timing_mu_prior;
+#   real timing_mu_sigma_prior;
+#   real timing_sigma_prior;
+#   real timing_sigma_sigma_prior;
+#   real spread_mu_prior; 
+#   real spread_mu_sigma_prior;
+#   real spread_sigma_prior; 
+#   real spread_sigma_sigma_prior;
+#   real residence_mu_prior;
+#   real residence_sigma_prior;
 
+# model level 2
+  # run_mu       ~ normal(run_mu_prior, run_mu_sigma_prior); 
+  # run_sigma    ~ normal(run_sigma_prior, run_sigma_sigma_prior; 
+run_mu_prior =             median(run) # param. about 20,000
+run_mu_sigma_prior =       0.25 * run_mu_prior
+run_sigma_prior =          0.25 * run_mu_prior # param for sd of runs
+run_sigma_sigma_prior =    0.25 * run_sigma_prior
+  # timing_mu    ~ normal(timing_mu_prior, timing_sigma_prior);
+  # timing_sigma ~ normal(timing_sigma_prior, timing_sigma_sigma_prior;
+timing_mu_prior =          timing_mu # param. 300 from sim
+timing_mu_sigma_prior =    timing_sigma # 5 from sim 
+timing_sigma_prior =       timing_sigma # param. 5 from sim 
+timing_sigma_sigma_prior = 1 
+# spread_mu    ~ normal(spread_mu_prior, spread_sigma_prior);
+# spread_sigma ~ normal(spread_sigma_prior, spread_sigma_sigma_prior);
+spread_mu_prior =          spread_mu # param. 7 from sim
+spread_mu_sigma_prior =    spread_sigma # 1 from sim
+spread_sigma_prior =       spread_sigma # param. 1 from sim
+spread_sigma_sigma_prior = 0.25 * spread_sigma_prior
+# residence    ~ normal(residence_mu_prior, residence_sigma_prior);
+## this is not a multilevel parameter
+residence_mu_prior = residence_mu # param. 12 from sim
+residence_sigma_prior = residence_sigma 
 
-# data {
-#   int n_priors;                   // count scalar priors 
-#   vector[n_priors] prior;         // prior knowledge, scalar params
-#   int n_years;                    // count years, rows in matrix 
-#   int max_obs;                    // cols in matrix
-#   int n_obs_year [n_years];       // count obs each year
-#   matrix[n_years, max_obs] day;   // days in years, ragged 
-#   matrix[n_years, max_obs] y_obs; // obs  in years, ragged
-# }  
-dat=list(n_priors= 12, prior=prior, n_years=n_years, max_obs=n_obs_max,
-         n_obs_year=n_obs_year, day=day, y_obs=y_obs)
-cat('\ndat is a list:\n'); str(dat)
+cat('\nPrior knowledge of parameter distributions\n'); 
+cat(
+  '\n run_mu_prior:', run_mu_prior, 'run_mu_sigma_prior:',run_mu_sigma_prior,
+  '\n run_sigma_prior:', run_sigma_prior, 'run_sigma_sigma_prior:',run_sigma_sigma_prior,
+  '\n timing_mu_prior:',timing_mu_prior,  'timing_mu_sigma_prior:', timing_mu_sigma_prior, 
+  '\n timing_sigma_prior:', timing_sigma_prior, 'timing_sigma_sigma_prior:', timing_sigma_sigma_prior,
+  '\n spread_mu_prior:',spread_mu_prior,  'spread_mu_sigma_prior:',spread_mu_sigma_prior, 
+  '\n spread_sigma_prior:',spread_sigma_prior, 'spread_sigma_sigma_prior:', spread_sigma_sigma_prior,
+  '\n residence_mu_prior:',residence_mu_prior,'residence_sigma_prior:', residence_sigma_prior
+)
+
+```
+
+Data
+
+```{r}
+#| label: dat_4_stan
+
+#data 
+#  int n_years;                    // rows in data
+#  int n_max_obs;                  // columns in data
+#  int n_obs_year [n_years];       // how many obs each year
+#  matrix [n_years, n_max_obs] day;        // dates,    ragged, reals 
+#  array  [n_years, n_max_obs] int y_obs;  // observed, ragged, integers
+dat = list(
+  run_mu_prior = run_mu_prior, 
+  run_mu_sigma_prior = run_mu_sigma_prior,
+  run_sigma_prior = run_sigma_prior,
+  run_sigma_sigma_prior = run_sigma_sigma_prior,
+  timing_mu_prior = timing_mu_prior, 
+  timing_mu_sigma_prior = timing_mu_sigma_prior, 
+  timing_sigma_prior = timing_sigma_prior,
+  timing_sigma_sigma_prior = timing_sigma_sigma_prior,
+  spread_mu_prior = spread_mu_prior, 
+  spread_mu_sigma_prior = spread_mu_sigma_prior,
+  spread_sigma_prior = spread_sigma_prior,
+  spread_sigma_sigma_prior = spread_sigma_sigma_prior,
+  residence_mu_prior =residence_mu_prior, 
+  residence_sigma_prior = residence_sigma_prior,
+    n_years=n_years, # data
+    n_max_obs=n_obs_max,
+    n_obs_year=n_obs_year,
+    day=day,
+    y_obs=y_obs)
+cat('\n dat for Stan:\n'); str(dat)
 
 ```
 
@@ -425,83 +593,158 @@ The model is a character string. This is checked for syntax by function **stanc(
 #|cache: true
 MultiYearGauss_code <- ' 
 functions {  
-  vector Presence(int n, row_vector days, real abund, real mu, real sigma, real lag ){
+vector Presence(int n, row_vector days, real abund, 
+                real mu, real sigma, real lag) {
     vector [n] presence; 
     for (j in 1:n){
-      presence[j] = normal_cdf(days[j], mu,    sigma) - 
-                    normal_cdf(days[j], mu+lag,sigma);
+        presence[j] = normal_cdf(days[j], mu,    sigma) - 
+                      normal_cdf(days[j], mu+lag,sigma);
     }
-    return presence * abund;
+    return abund .* presence;
   }
 }
 
 data {
-  int n_priors;                   // count scalar priors 
-  vector[n_priors] prior;         // prior knowledge, scalar params
-  int n_years;                    // count years, rows in matrix 
-  int max_obs;                    // cols in matrix
-  int n_obs_year [n_years];       // count obs each year
-  matrix[n_years, max_obs] day;   // days in years, ragged 
-  matrix[n_years, max_obs] y_obs; // obs  in years, ragged
+//prior knowledge of level 2 distributions. 14 of these.
+  real run_mu_prior;           // run_mu is a parameter
+  real run_mu_sigma_prior;     // with a distribution
+  real run_sigma_prior;        // run_sigma is a parameter
+  real run_sigma_sigma_prior;  // with a distribution
+  real timing_mu_prior;
+  real timing_mu_sigma_prior;
+  real timing_sigma_prior;
+  real timing_sigma_sigma_prior;
+  real spread_mu_prior; 
+  real spread_mu_sigma_prior;
+  real spread_sigma_prior; 
+  real spread_sigma_sigma_prior;
+  real residence_mu_prior;
+  real residence_sigma_prior;
+//data  
+  int n_years;                            // rows in data
+  int n_max_obs;                          // columns in data
+  array  [n_years] int n_obs_year;        // number of obs each year
+  matrix [n_years, n_max_obs] day;        // dates, ragged, reals 
+  array  [n_years, n_max_obs] int y_obs;  // obs,   ragged, integers
 }
 parameters { 
-//---- level 2 ----
-  real <lower=0> timing;           // entry mean all years
-  real <lower=0> spread;           // entry spread all years
-  real <lower=0> run_mean;         // spawner abundance mean all years
-//---- level 1 ----
-  vector [n_years] run;            // total spawners. year effect. some negative
-  vector [n_years] year_timing;    // entry mean.     year effect. some negative
-  vector [n_years] year_spread;    // entry spread.   year effect. some negative
-  real <lower=0> residence;        // duration on spawning site
-  real <lower=0> sigma;            // stdev of normal residuals 
+//---- level 2: overall ----
+  real <lower=0> run_mu;        // mean all years
+  real <lower=0> run_sigma;     // sd   all years
+  real <lower=0> timing_mu;     // mean all years
+  real <lower=0> timing_sigma;  // sd   all years
+  real <lower=0> spread_mu;     // mean all years
+  real <lower=0> spread_sigma;  // sd   all years
+  real <lower=0> residence;     // duration observable, no year effect
+//---- level 1: instance ----
+  vector  [n_years]  run_year;     // run    each year
+  vector  [n_years]  timing_year;  // timing each year
+  vector  [n_years]  spread_year;  // spread each year
 }
 model {
-//---- local variables ----
-  vector[max_obs] y_pred;  // predicted within a year
-  real t;                  // predicted timing, overall + year effect
-  real s;                  // predicted spread, overall + year effect
-  real r;                  // predicted run,    overall + year effect
-  int  n;                  // count obs in a year for ragged arrays
-//---- level 2 ---- prior knowledge PDDs parameters ----
-  timing            ~ normal(prior[1], prior[2]);
-  spread            ~ normal(prior[3], prior[4]);
-  run_mean          ~ lognormal(log(prior[5]), 1 );
-//---- level 1 ---- prior knowledge PDDs parameters ----
-  run               ~ normal(0,prior[6]);  // effect: plus or minus
-  year_timing       ~ normal(0,prior[7]);  // effect: plus or minus
-  year_spread       ~ normal(0,prior[8]);  // effect: plus or minus
-  residence         ~ normal(prior[9],prior[10]);
-  sigma             ~ cauchy(prior[11], prior[12]); # normal, additive
-//---- predict from sample of parameters ---- 
-  for (year in 1:n_years){
-    t = timing   + year_timing[year];  // predicted timing this year
-    s = spread   + year_spread[year];  // predicted spread this year
-    r = run_mean + run[year];          // predicted run this year 
-    n = n_obs_year[year];              // count obs this year
-    y_pred[1:n] = Presence(n,day[year,1:n],r,t,s,residence);  
+//---- local variables, values within a year ----
+  vector [n_max_obs] y_pred;  // predicted obs 
+  real  r;                    // predicted run
+  real  t;                    // predicted timing
+  real  s;                    // predicted spread
+  int   n;                    // how many obs in this year
+
+//---- prior knowledge of level 2 parameter distributions ----
+  run_mu       ~ normal(run_mu_prior,       run_mu_sigma_prior); 
+  run_sigma    ~ normal(run_sigma_prior,    run_sigma_sigma_prior); 
+  timing_mu    ~ normal(timing_mu_prior,    timing_sigma_prior);
+  timing_sigma ~ normal(timing_sigma_prior, timing_sigma_sigma_prior);
+  spread_mu    ~ normal(spread_mu_prior,    spread_sigma_prior);
+  spread_sigma ~ normal(spread_sigma_prior, spread_sigma_sigma_prior);
+  residence    ~ normal(residence_mu_prior, residence_sigma_prior); // no year effect
+
+//---- level 1 parameter distributions sampled from level 2 ----
+  run_year     ~ normal(run_mu,run_sigma);
+  timing_year  ~ normal(timing_mu,timing_sigma);
+  spread_year  ~ normal(spread_mu,spread_sigma);
+
+//---- predict from sampled parameters ---- 
+//print(" run_mu: ", run_mu, " run_sigma: ", run_sigma,
+//  " timing_mu: ", timing_mu, " timing_sigma: ", timing_sigma,
+//  " spread_mu: ", spread_mu, " spread_sigma: ", spread_sigma,
+//  " residence ", residence) ; 
+//print(" run_year: ", run_year);
+//print(" timing_year: ", timing_year);
+//print(" spread_year: ", spread_year);
+    
+  for (year in 1:n_years) {
+    r = run_year[year]; 
+    t = timing_year[year];
+    s = spread_year[year];
+    n = n_obs_year[year]; 
+    y_pred[1:n] = Presence(n,day[year],r,t,s,residence);
+//print(y_obs [year, 1:n]);
+//print(y_pred[1:n]);
+
 //---- accumulate probability of data given prediction ----
-    y_obs[year, 1:n] ~ normal(y_pred[1:n], sigma);  // vectorized
+    target += poisson_lupmf(y_obs[year, 1:n] | y_pred[1:n]); # y_obs is integers
   }    
 } '
 
 stanc_ret <- stanc(model_code=MultiYearGauss_code) # check fussy syntax, compile 
-MultiYearGauss <- stan_model (stanc_ret=stanc_ret) # create model
+MultiYearGauss <- stan_model (stanc_ret=stanc_ret, model_name = 'MultiYearGauss') # create model
 ```
+
+Expose Function: Presence()
 
 # Fit Model to Observations
 
 *No prediction, no science.*
 
-$y_{obs}$ is from imprecise sampling of simulated $y_{true}$, and applied to challenge predictions.
+$y_{obs}$ is from imprecise sampling of simulated $y_{true}$, and applied to challenge predictions, $y_{pred}$, from this (of all possible) model.
 
 ```{r}
 #|label: sampling_MultiYearGauss
 #|cache: true
-# library(rstan)
-s1 <- sampling( MultiYearGauss, data=dat, 
-        chains=4, iter=8000, warmup=2000, cores=4)
+init_1_chain = list( 
+  list( 
+    run_mu= 20000, run_sigma=2000, timing_mu = 300, timing_sigma = 5, 
+    spread_mu =7, spread_sigma = 1, residence=12,
+    run_year =    rnorm(20, 20000, 2000), 
+    timing_year = rnorm(20,   300, 5),
+    spread_year = rnorm(20,    12, 2) 
+  )
+)
 
+init_4_chains = list(
+  list(
+    run_mu=22000, run_sigma=4000, timing_mu= 310, timing_sigma=7, 
+    spread_mu=9, spread_sigma=2, residence = 13,
+    run_year =    rnorm(20, 20000, 4000), 
+    timing_year = rnorm(20, 300, 5),
+    spread_year = rnorm(20, 12, 2) 
+  ),
+  list(
+    run_mu=21000, run_sigma=3500, timing_mu=305, timing_sigma=6, 
+    spread_mu=8, spread_sigma=2, residence=13,
+    run_year =    rnorm(20, 20000,4000), 
+    timing_year = rnorm(20, 300, 5),
+    spread_year = rnorm(20,  12, 2) 
+  ),
+  list(
+    run_mu=20000, run_sigma=3000, timing_mu=300, timing_sigma=5, 
+    spread_mu=7, spread_sigma=2, residence=13,
+    run_year =    rnorm(20, 20000,4000), 
+    timing_year = rnorm(20, 300, 5),
+    spread_year = rnorm(20,  12, 2) 
+  ),
+  list(
+    run_mu=19000, run_sigma=2500, timing_mu=295, timing_sigma=4, 
+    spread_mu=6, spread_sigma=2, residence=13,
+    run_year =    rnorm(20, 20000,4000), 
+    timing_year = rnorm(20, 300, 5),
+    spread_year = rnorm(20,  12, 2) 
+  )
+)
+
+#s1 <- sampling( MultiYearGauss, data=dat, init=init_1_chain,chains=1, iter=2)
+s1 <- sampling( MultiYearGauss, data=dat, init=init_4_chains,
+                chains=4, iter=10000, warmup=2000, cores=4, refresh=2000)
 ```
 
 ### Marginal Distributions
@@ -509,27 +752,35 @@ s1 <- sampling( MultiYearGauss, data=dat,
 ```{r}
 #|label: prt_sampling_s1
 print (s1)
-plot(s1, pars=c('run'))
-plot(s1, pars=c('year_timing'))
-plot(s1, pars=c('year_spread'))
+plot(s1, pars=c('run_year'))
+plot(s1, pars=c('timing_year'))
+#plot(s1, pars=c(''))
 ```
 
 ### Compare fitted parameters to original
 
 ```{r}
 #| label: compare
-a=s1@.MISC[["summary"]][["msd"]]  # mean and sd from fit
-a = round(a,2)
-a1[1:2] = c(mu_timing,mu_spread)
-a1[3:22] = abund
-a1[23:42] = timing-mu_timing  # effect by year
-a1[43:62] = spread - mu_spread # effect by year
-a1[63] = residence
-a1[64:65] = NA
-a1= round(a1,1)
-a = cbind (a, a1) ; rm(a1);
-print(a)
 
+a=s1@.MISC[["summary"]][["msd"]]  # mean and sd from fit
+a1= numeric(dim(a)[1])
+a1[ 1:7] = c(mean(run), sd(run),mean(timing), sd(timing),mean(spread), sd(spread), residence)
+a1[ 8:27] = run
+a1[28:47] = timing
+a1[48:67] = spread
+a1[68] = NA
+a = cbind(a, a1) %>% round(2); rm(a1);
+colnames(a) = c("Predicted","Stdev","Observed")
+print(a)
+write.csv(a, file='./results/fit and obs poisson residuals 2024-08-31.txt')
+# plot pred vs true
+a1 = a[-c(1:7, 68),] %>% as.data.frame # drop scalars and lp__
+a1$param = rep(c('Run','Timing','Spread'), each = 20)
+ggplot(a1, aes(Observed, Predicted)) + 
+    facet_wrap(param~., scales='free') +
+    geom_point() + geom_abline(slope=1, intercept=0) 
+
+ggsave('./results/pred_obs_poisson_2024_08_31.pdf', width=5.5, height=5.5) 
 ```
 
 ### Save Results

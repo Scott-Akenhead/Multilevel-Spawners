@@ -1,0 +1,660 @@
+---
+title: "Stan MLR OSO SOX"
+author: "Scott A. Akenhead"
+date: today
+format: pdf
+editor: visual
+execute:
+  cache: true
+  hold: Hold 
+---
+
+```{r}
+#| label: setup
+#| echo: false
+#| output: false
+library(rstan);library("loo"); library(purrr);
+library(magrittr);library(ggplot2); library(knitr);
+library(patchwork); 
+rstan_options(auto_write = TRUE) # do not recompile code not changed
+
+theme_SAA = function(){
+  theme_set(theme_bw()) 
+  theme_replace(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(
+        linetype='dotted',colour ='grey', linewidth=0.2) ) 
+}
+```
+
+## Quotes
+
+> When data sizes are small, parameter estimation can be stabilized and sharpened by providing hierarchical priors. With hierarchical priors, **the data determines the amount of partial pooling among the group**s. The only drawback is that if the number of groups is small, it can be hard to fit these models without strong hyperpriors. – <https://mc-stan.org/docs/2_23/stan-users-guide/multilevel-regression-and-poststratification.html>
+
+> Priors on priors, also known as “hyperpriors,” should be treated the same way as priors on lower-level parameters in that as **much prior information as is available should be brought to bear**. – <https://mc-stan.org/docs/2_23/stan-users-guide/hierarchical-priors-section.html>
+
+# Intro
+
+This doc re-purposes the Stan model from *Multi_Year_Spawners.qmd* for the data used in *AUC each OSO SOX.qmd.* Extensive changes include converting from ragged arrays to *tidyverse long format*, in order to deliver
+
+| generated quantities {\
+      vector \[n_obs\] log_lik;   \
+      log_lik = poisson_lpmf(y_obs \| y_pred);\
+  }
+
+### Multilevel parameters
+
+There are two levels to this regression model. A Level-1 parameter is fitted, by observing the probability density of data while **sampling** the parameters space, to an individual year. The prior information for that sampling is from a similarly fitted distribution for that parameter for all years. Level-2 parameters are those fitted to the all-years distributions. This approach lies between (a) parameters estimated for all years lumped, and (b) parameters estimated for each year in isolation. This approach constrains an imprecise parameter estimate from a single year (likely to be an outlier) to be similar to the years where that parameter is precisely estimated. Heuristically: information is shared between years.
+
+The level-1 parameters for individual years, $y$, are the timing (day of the year), spread (days), and escapement (run, abundance) of spawner entry to the surveyed area: $\mu_y,\  \sigma_y,\  E_y$. The entry, by days, of spawners to the surveyed area (spawning ground) is described by the parameters of a Gauss PDD (aka *normal* distribution):$$\text{Pr}(E_{t,y} |t) = E_y \times \mathcal{G}(t,\mu_y,\sigma_y)$$\
+In addition, the parameter for residence time (aka survey life), $R$, is likely variable between years, $R_y$, thus level-1, but may vary little, or be difficult to estimate. Here $R$ is applied as fixed value: same all years. Each fitted parameter estimate for level-1 has an associated distribution: $\mu, \ \sigma$. Parameters are unlikely to be independent and correlations can be observed in bi-plots of posterior distributions (the results from sampling).
+
+The level-2 parameters are location and spread for each of the associated level-1 parameters. At this phase, this is confined to run size and timing, so there are six of these: \$\\mu\_\\mu,\\ \\mu\_\\sigma, \\ \\sigma\_\\mu,\\ \\sigma\_\\sigma,\\ E\_\\mu,\\ E\_\\sigma \$. This is based on the assumption that the distribution of each level-1 parameter is adequately described by an independent PDD, such as for $\mu_y$: $\text{Pr}(\mu_y |x) = \mathcal{G}(x, \mu_\mu, \mu_\sigma)$. The prior knowledge for each of these eight parameters is another PDD with location and spread, so there are 12 priors.
+
+Lastly, there are priors for the mean and stdev of parameters that are not directly a part of a multi-level regression: entry and residence time, another 4 priors.
+
+### Complexity
+
+The following code explores models of increasing complexity to identify over-fitting, to show where the available information allows precise estimations before being exhausted.
+
+> Using cross-validation to compare a model with an additional term to a model without that term is a kind of null hypothesis testing. Cross-validation can tell whether that extra term can improve the predictive accuracy. The improvement in the predictive accuracy is a function of signal-to-noise-ratio, the size of the actual effect, and how much the effect is correlating with other included effects.\
+> - <https://mc-stan.org/loo/articles/online-only/faq.html>
+
+# Stan Code
+
+The model is a character string. This is checked for syntax by function **stanc().** Upon passing those checks, the result is C+ code. That result is compiled to be part of a Stan model by function **stan_model().** Challenging the model with data, fitting, is a subsequent function: **sampling().**
+
+```{r}
+#|label: multi_year_gauss
+#|cache: true
+MultiYearGauss_code <- ' 
+functions {  
+  vector Presence(int n, row_vector days, real abund, 
+                real mu, real sigma, real lag) {
+    vector [n] presence; 
+    for (j in 1:n){
+      presence[j] = normal_cdf(days[j], mu,    sigma) - 
+                    normal_cdf(days[j], mu+lag,sigma);
+    }
+    return abund .* presence;
+  }
+}
+
+data {
+  // prior knowledge of two level-2 distributions
+  real run_mu_prior;           // run_mu is a parameter
+  real run_mu_sigma_prior;     // with a fitted distribution
+  real run_sigma_prior;
+  real run_sigma_sigma_prior;
+  real timing_mu_prior;
+  real timing_mu_sigma_prior;
+  real timing_sigma_prior;
+  real timing_sigma_sigma_prior;
+  
+  //prior knowledge of two fixed parameters.
+  real spread_mu_prior; // not annual, not multilevel
+  real spread_sigma_prior;
+  real residence_mu_prior;
+  real residence_sigma_prior;
+  
+// observed  
+  int                 n_years;     // number of years
+  int                 n_obs;       // data length: day, y_obs
+  array [n_years] int year_first;  // index data for each year
+  array [n_years] int year_last;
+  array [n_obs]   int y_obs;       // spawner counts are integers
+  row_vector [n_obs]  day;         // survey day of the year
+}
+parameters { 
+  // ---- level 2: overall ----
+  real <lower=0> run_mu;        // mean of all runs
+  real <lower=0> run_sigma;     // sd   of all runs
+  real <lower=0> timing_mu;     // mean of all timings
+  real <lower=0> timing_sigma;  // sd   of all timings
+  
+  // ---- level 1: annual instance ----
+  vector  [n_years]  run_year;     // run    each year
+  vector  [n_years]  timing_year;  // timing each year
+  
+  // fixed parameters, same every year
+  real <lower=0> spread;        // no year effect
+  real <lower=0> residence;     // survey life, no year effect
+}
+model {
+  //---- local variables  ----
+  vector [n_obs] y_pred;  // predicted obs
+  
+  // ---- PRIORS. level 2: distribution of annual parameters
+  run_mu       ~ normal(run_mu_prior,    run_mu_sigma_prior); 
+  run_sigma    ~ normal(run_sigma_prior,    run_sigma_sigma_prior); 
+  timing_mu    ~ normal(timing_mu_prior,    timing_sigma_prior);
+  timing_sigma ~ normal(timing_sigma_prior, timing_sigma_sigma_prior);
+
+  // ---- PRIORS. level 1: annual parameters, as samples from level 2
+  run_year     ~ lognormal(run_mu,run_sigma);        // all years
+  timing_year  ~    normal(timing_mu,timing_sigma);  // all years
+
+  // ---- PRIORS. fixed parameters, not annual, not multilevel
+  spread ~    normal(spread_mu_prior,    spread_sigma_prior);
+  residence ~ normal(residence_mu_prior, residence_sigma_prior); 
+    // print(" run_year:",    run_year);
+    // print(" timing_year: ", timing_year);
+    // print(" spread: ",      spread); 
+    // print(" residence: ",   residence); 
+
+  // ---- PREDICTION. from samples from parameters space
+  for (year in 1:n_years) {
+    int y1;          // index, data, year_first[year]
+    int y2;          // index, data, year_last[year]
+    int n_days;      // count of surveys this year
+    y1= year_first[year];
+    y2 = year_last[year];
+    n_days = (y2-y1)+1 ; 
+    y_pred[y1:y2] = Presence(n_days, day[y1:y2],run_year[year], timing_year[year],spread,residence);
+        // print(year);
+        // print(y_obs  [y1:y2]);
+        // print(y_pred [y1:y2]);
+  }
+  // ---- PROBABILITY of data given prediction
+  target += poisson_lupmf(y_obs | y_pred); # y_obs is integers
+} '
+    
+# generated quantities {
+#   vector[n_obs] log_lik;
+#   log_lik = poisson_lpmf(y_obs | y_pred);
+# } '
+
+#  example from LOO package:
+# generated quantities {
+#   vector[N] log_lik;
+#   for (n in 1:N) {
+#     log_lik[n] = bernoulli_logit_lpmf(y[n] | X[n] * beta);
+#   }
+# }
+
+
+stanc_ret <- stanc(model_code=MultiYearGauss_code) # check fussy syntax, compile 
+MultiYearGauss <- stan_model (stanc_ret=stanc_ret, model_name = 'MultiYearGauss') # create model
+```
+
+# Data
+
+Survey results are two ragged arrays:
+
+-   *day*, the day of the solar year for each survey;
+-   *y_obs*, the observed count of spawners. This is scaled from max about
+
+Rows are years 2000 to 2023. Each row is *n_max_obs* long, the max count of surveys in any year (19 in 2012). The valid data in each row is 1:*n_obs_year\[year\]* and the remaining elements are 0.\
+
+In order to use LOO package, the Stan model must use "tidy" data structure: column names: **year, day, y_obs**. The count of obs each year is *n_obs_year.* There is no *by( )* function in Stan to deal with groups (but see package **brms**::), so, to simplify calculations the data is indexed by accumulated row counts. This uses two vectors: index of first observation for a year, and index for last observation. For a specific ***year*** the data is\
+*y_obs\[ year_obs_first\[**year**\] : year_obs_last\[**year**\] \];*\
+which allows a single vector for *log_lik* in the generated quantities block in Stan.
+
+```{r}
+#| label: read_surveys
+#| cache: true
+# from Bradàn Judson
+counts = readRDS('./data/OSO_SOX_surveys.Rdata') # 277 by 3
+day = counts$Solar_Day
+y_obs= counts$Live
+n_obs= length(y_obs)  # 277
+n_years = 24 # 2000 to 2023
+# indices for start and end of year in y_obs and day
+n_obs_year = by(counts$Live,counts$Year,length) %>% as.vector
+cat('n obs each year:\n', n_obs_year, '\n')
+# 11 11 11 10 12 12 12 10 14 17 15 19 13 11  9 11 10  9 10 10 10 10  9 11
+year_last= cumsum(n_obs_year)
+year_first = c (1, year_last[-n_years]+1)
+cat('year_first: \n', year_first, '\n')
+cat('year_last: \n',  year_last,  '\n')
+
+# from Guass fits as basis for prior knowledge of parameter distributions.
+fit_G = readRDS('./results/fit_G.Rdata') 
+
+```
+
+# Plots of Previous Information
+
+What are the distributions of run, timing, and spread from fitting Gauss PDDs to individual years? That model does not estimate residence time.
+
+```{r}
+#| label: histos
+#| warning: false
+p1 = ggplot(data = counts, aes(Live)) + theme_SAA() +
+    geom_histogram(bins=10,colour="black", fill="wheat2") +
+    coord_cartesian(expand = FALSE)+
+    labs(x="Counts of Live Spawners", y="Frequency")
+p2 = ggplot(data = counts, aes(log10(Live) )) + theme_SAA() +
+    geom_histogram(bins =10, colour="black", fill="wheat2") +
+    coord_cartesian(expand = FALSE) +
+    labs(x="log10(Counts of Live Spawners)", y="Frequency")
+#p1 + p2   # patchwork::
+
+# noquote(colnames(fit_G))
+# Year  Mu    sd_m  Sigma sd_s  AUC   sd_a  r2  
+
+p3 = ggplot(data = fit_G, aes(AUC)) + theme_SAA() +
+    geom_histogram(bins =10,colour="black", fill="wheat2") +
+    coord_cartesian(expand = FALSE)+
+    labs(x="Gauss Integral Counts", y="Frequency")
+p4 = ggplot(data = fit_G, aes(log10(AUC) )) + theme_SAA() +
+    geom_histogram(bins =10, colour="black", fill="wheat2") +
+    coord_cartesian(expand = FALSE)+
+    labs(x="log10(Gauss Integral Counts)", y="Frequency")
+#p3 + p4
+
+p5 = ggplot(data = fit_G, aes(Mu)) + theme_SAA() +
+    geom_histogram(bins =10, colour="black", fill="wheat2") +
+    coord_cartesian(expand = FALSE)+
+    labs(x="Entry Timing (Solar Day)", y="Frequency")
+p6 = ggplot(data = fit_G, aes(Sigma)) + theme_SAA() +
+    geom_histogram(bins =10, colour="black", fill="wheat2") +
+    coord_cartesian(expand = FALSE)+
+    labs(x="Entry Spread (days)", y="Frequency")
+#p5 + p6
+
+p1+p2+p3+p4+p5+p6 + plot_layout(ncol = 2)
+# ggsave('./results/histos previous info.png',width=14, height=9)
+# ggsave('./results/histos previous info.pdf',width=14, height=9)
+```
+
+# Prior Knowledge
+
+Prior knowledge of parameter distributions is a combination of estimates from available data and suppositions about the shape and extent of distributions:
+
+-   previous fits for **entry** **timing** and **spread**, in each year, characterizes priors within and between years.
+-   Similarly for **escapement** (run, total spawners, AUC/residence) from preceding individual Gauss fits. Here the fitted and prior distributions are non-negative, simply log-normal, thus log(mean) and log(stdev) are the priors for level two.
+    -   annual values for escapement are sampled from a fitted log-normal, with the fit starting from that prior knowledge;
+    -   log(range(fit_G\$AUC/11)) = 8.5, 11.9;
+    -   midpoint of that range, 10.2, the mean for lognormal prior; and
+    -   if range is $\pm 2 \sigma$ then (11.9 -8.5)/4 = 0.85 is stdev for lognormal prior.
+    -   This prior, $e^{\mathcal{G}(10.2,0.85)}$ has 6% chance of escapement $E \ge 100\text{k}$, 0.03% of $E \ge 500\text{k}$, and 0.001% of $E \ge 1\text{M}$.
+
+The prior for residence time is 11 days as per conventional analysis. This parameter is sensitive to be being drawn to low values. Why? Consider that two identical cumulative Gauss distributions of spawners by day. If these are separated by one day (residence time), then subtracting those is essentially the derivative of the cumulative distribution. That degenerative case is the same as fitting a simple Gauss distribution. To avoid this, the prior knowledge for the residence time distribution is limited so $\pm 3 \sigma$ is half or double, $\sigma=11/6$. The prior knowledge for residence time distribution is $\mathcal{G}(\mu=11, \sigma=1.8)$.
+
+```{r}
+#| label: lognorm
+x = seq(0., 3.e5, 1000.)
+yd= dlnorm(x, 10.2, 0.85)
+ydmax = max(yd)
+y= plnorm(x, 10.2, 0.85) 
+yp =y * max(yd) / max(y)
+plotdat = data.frame (x, y= dlnorm(x, 10.2, 0.85) )
+ggplot(plotdat, aes(x,yd)) + theme_SAA() +
+    geom_line(colour='red') +
+    geom_line(aes (x, yp), colour='blue') +
+    labs(x="Escapement Prior", y="Probability Density")
+rm(x,y,yp)
+```
+
+There are12 priors in the Stan model. Here we change the name escapement to run.
+
+-   8 at level-2:
+    -   run_mu_prior; run_mu_sigma_prior;
+
+    -   run_sigma_prior; run_sigma_sigma_prior;
+
+    -   timing_mu_prior; timing_mu_sigma_prior;
+
+    -   timing_sigma_prior; timing_sigma_sigma_prior;
+-   4 as fixed parameters:
+    -   spread_mu_prior; spread_sigma_prior;
+
+    -   residence_mu_prior; residence_sigma_prior;
+
+A level-2 parameter like ***run*** (escapement, annual spawner abundance) is a distribution with two fitted parameters: ***run_mu*** (mean) and ***run_sigma*** (standard deviation). That distribution generate samples for the corresponding level-1 parameter: annual predictions for run:
+
+> run_year \~ lognormal(run_mu, run_sigma);
+
+The fitted parameter ***run_mu*** has two priors:\
+***run_mu_prior*** – the mean for run_mu; and ***\
+run_mu_sigma_prior*** – the standard deviation for run_mu.\
+Similarly, ***run_sigma*** has two priors:\
+***run_sigma_prior, run_sigma_sigma_prior.***
+
+Information on *timing* each year is mean survey date weighted by fish observed. Similarly *spread* similarly weighted sd of survey dates, using prev weighted mean. These annual values are the basis for prior knowledge of fixed parameters.
+
+```{r}
+#| label: priors_stan
+
+W_m  = function(x) {sum(x[,1]*x[,2]) / sum(x[2])} # weighted mean
+W_sd = function(x){  # weighted stdev using weighted mean
+    wm = W_m(x);
+    w = x[,2] * (1.0/sum(x[,2])) # weights vector. sum(w) = 1
+    wm = sum( x[,1]*w )
+    wsd = sum( (x[,1]-wm)^2 *w)  %>% sqrt;
+    return(wsd)
+}
+
+# information on timing and spread each year as weighted means.
+timing = by(counts[,c('Solar_Day', 'Live')], counts$Year, W_m) %>% as.vector;
+spread = by(counts[,c('Solar_Day', 'Live')], counts$Year, W_sd) %>% as.vector;
+cat('\n previous information from fitting Gauss by year \n')
+cat('timing by year \n',round(timing,1),'\n');
+#    295.1 298.2 302.1 300.0 296.4 298.5 301.0 301.0 297.0
+#    299.1 295.2 300.3 300.7 297.9 303.0 298.8 300.0 300.5
+#    299.7 300.9 304.1 300.2 300.5 301.4
+cat('spread  by year \n',round(spread,1),'\n');
+#    6.2 7.2 6.8 6.8 7.5 6.1 6.9 7.1 8.4 7.1 8.4 7.9 7.7
+#    6.5 6.6 6.6 5.9 6.9 6.4 6.6 6.6 5.4 8.3 7.4
+timing_mu_prior = mean(timing)  # Solar Day 299.6
+timing_mu_sigma_prior = sd(timing) # 2.23 days, seems small
+timing_sigma_prior = timing_mu_sigma_prior  
+timing_sigma_sigma_prior = 0.25* timing_mu_sigma_prior # guesstimate
+
+# spread_mu    ~ normal(spread_mu_prior, spread_mu_sigma_prior);
+# spread_sigma ~ normal(spread_sigma_prior, spread_sigma_sigma_prior);
+spread_mu_prior =  mean(spread) 
+spread_mu_sigma_prior =  sd(spread)
+spread_sigma_prior = spread_mu_sigma_prior
+spread_sigma_sigma_prior = 0.25 * spread_sigma_prior
+
+# residence is one value for all years Not level-1 annual values
+residence_mu_prior = 11.0 # conventional value
+residence_sigma_prior = 11/6 # 1.83, range of 3sd=99.86%=1/741:5.5 to 16.5
+
+# priors for run size from previous Gauss fits: fit_G.Rdata
+cat('\n stats from Gauss fits of annual run size \n Min. 1st Qu.  Median    Mean 3rd Qu.    Max. \n', summary(fit_G$AUC/11),'\n')
+#  Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   4746   16445   36408   46781   70231  151637 
+#  sd/mean and mad/median are 89.1% and 93.3%
+# to avoid negative runs, prior for run size must be lognormal.
+cat('ditto but as log values \n', summary(log(fit_G$AUC/11.0)),'\n')
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#   8.465   9.705  10.503  10.372  11.159  11.929
+run_mu_prior =          10.2 # log mean run, see preceding section
+run_mu_sigma_prior=     0.85 # smaller than 1.483* (11.159-9.705)/2  
+run_sigma_prior=        0.85
+# (fit_G$AUC/11.0) %>% log %>% mad --> 1.112674
+run_sigma_sigma_prior = 0.05  # guess, needs constraining, max~1.38
+# plot samples for run based on priors
+a = rlnorm(100, rnorm(100, run_mu_prior, run_mu_sigma_prior), 
+                rnorm(100, run_sigma_prior,run_sigma_sigma_prior))
+    summary(a); 
+    hist(a,breaks= 20, main='', xlab='Run'); box();
+    hist(log10(a),breaks= 20, main='',xlab='log_10 Run'); box()
+
+dat0 = list(
+  run_mu_prior =             run_mu_prior, 
+  run_mu_sigma_prior =       run_mu_sigma_prior,
+  run_sigma_prior =          run_sigma_prior,
+  run_sigma_sigma_prior =    run_sigma_sigma_prior,
+  timing_mu_prior =          timing_mu_prior, 
+  timing_mu_sigma_prior =    timing_mu_sigma_prior, 
+  timing_sigma_prior =       timing_sigma_prior,
+  timing_sigma_sigma_prior = timing_sigma_sigma_prior,
+  spread_mu_prior =          spread_mu_prior, 
+  spread_sigma_prior =       spread_sigma_prior,
+  residence_mu_prior =       residence_mu_prior, 
+  residence_sigma_prior =    residence_sigma_prior)
+
+cat('\nPrior knowledge of parameter distributions\n'); 
+# print(unlist(dat0), digits =2)
+str(dat0)
+
+```
+
+# Data for Stan
+
+```{r}
+#| label: data_stan
+# // observed  
+  # int                 n_years;     // number of years
+  # int                 n_obs;       // data length: day, y_obs
+  # array [n_years] int year_first;  // index data for each year
+  # array [n_years] int year_last;
+  # array [n_obs]   int y_obs;       // spawner counts are integers
+  # row_vector [n_obs]  day;         // survey day of the year
+
+dat =list_modify(dat0,        # from purrr:: 
+    n_years = n_years,  n_obs = n_obs,
+    year_first = year_first,  year_last = year_last,
+    day = day, 
+    y_obs = y_obs)
+cat('dat for Stan:\n'); str(dat)
+# rm(dat0)
+```
+
+Expose Function: Presence()
+
+# Fit Model to Observations
+
+*No prediction, no science.*
+
+$y_{obs}$ is from imprecise sampling of unobserved $y_{true}$, and applied to challenge predictions, $y_{pred}$, from this model, of all possible models.
+
+## Initialize
+
+Starting points for sampling parameters. Without inits, parameter sampling starts with range -2:2 and fails. I based inits on priors for parameters, except for run_year.
+
+The initial parameter values for annual spawner run size, *run_year*, are poorly constrained as a lognormal distribution: values under 1,000 and over 1M are generated. To improve initiation, I used the Gauss fit of AUC divided by assumed residence time (11 days) as initial values.To initiate multiple chains these were tweaked by sd= 5%, so inits likely to be *run_0* plus or minus 15% .\
+*run_0* = fit_G\$AUC/11\
+*run_year* = *run_0* \* rnorm(n_years, 1, 0.05)\
+
+```{r}
+#|label: inits
+#|cache: true
+init_1_chain = list( 
+  list(
+    run_mu =       dat$run_mu_prior,
+    run_sigma =    dat$run_sigma_prior,
+    timing_mu =    dat$timing_mu_prior,
+    timing_sigma = dat$timing_sigma_prior, 
+    spread_mu =    dat$spread_mu_prior, 
+    spread_sigma = dat$spread_sigma_prior,
+    residence =    dat$residence_mu_prior,
+    run_year =     (fit_G$AUC/11.0) * rnorm(n_years,1, 0.05), # 5% error
+    timing_year =  rnorm(n_years, timing_mu_prior, timing_sigma_prior)
+  )
+)
+
+init_4_chains = list(
+  list(
+    run_mu =       dat$run_mu_prior,
+    run_sigma =    dat$run_sigma_prior, 
+    timing_mu =    dat$timing_mu_prior,
+    timing_sigma = dat$timing_sigma_prior, 
+    spread_mu =    dat$spread_mu_prior, 
+    spread_sigma = dat$spread_sigma_prior,
+    residence =    dat$residence_mu_prior,
+    run_year =     (fit_G$AUC/11.0)*rnorm(n_years,1, 0.05),
+    timing_year =  rnorm(n_years, timing_mu_prior, timing_sigma_prior)
+  ),
+  list(
+    run_mu =       0.95*dat$run_mu_prior,
+    run_sigma =    0.95*dat$run_sigma_prior, 
+    timing_mu =    0.95*dat$timing_mu_prior,
+    timing_sigma = 0.95*dat$timing_sigma_prior, 
+    spread_mu =    0.95*dat$spread_mu_prior, 
+    spread_sigma = 0.95*dat$spread_sigma_prior,
+    residence =    0.95*dat$residence_mu_prior,
+    run_year =     (fit_G$AUC/11.0)*rnorm(n_years,1, 0.05),
+    timing_year =  rnorm( n_years, timing_mu_prior, timing_sigma_prior)
+  ),
+  list(
+    run_mu =       1.05*dat$run_mu_prior,
+    run_sigma =    1.05*dat$run_sigma_prior, 
+    timing_mu =    1.05*dat$timing_mu_prior,
+    timing_sigma = 1.05*dat$timing_sigma_prior, 
+    spread_mu =    1.05*dat$spread_mu_prior, 
+    spread_sigma = 1.05*dat$spread_sigma_prior,
+    residence =    1.05*dat$residence_mu_prior,
+    run_year =     (fit_G$AUC/11.0)*rnorm(n_years,1, 0.05),
+    timing_year =  rnorm( n_years, timing_mu_prior, timing_sigma_prior) 
+  ),
+  list(
+    run_mu =       1.1*dat$run_mu_prior,
+    run_sigma =    1.1*dat$run_sigma_prior, 
+    timing_mu =    1.1*dat$timing_mu_prior,
+    timing_sigma = 1.1*dat$timing_sigma_prior, 
+    spread_mu =    1.1*dat$spread_mu_prior, 
+    spread_sigma = 1.1*dat$spread_sigma_prior,
+    residence =    1.1*dat$residence_mu_prior,
+    run_year =     (fit_G$AUC/11.0)*rnorm(n_years,1, 0.05),
+    timing_year =  rnorm( n_years, timing_mu_prior, timing_sigma_prior)
+    )
+)
+
+```
+
+## Sampling
+
+versions: debug, test, and product.
+
+```{r}
+#| label: sampling
+#| cache: true
+# debug  
+# s1 <- sampling( MultiYearGauss, data=dat, init=init_1_chain, chains=1,iter=2, warmup=1)
+# test  -- remember to kill print statements 
+s1 <- sampling( MultiYearGauss, data=dat, init=init_1_chain, control=list(max_treedepth=20), chains=1, iter=4000, warmup=2000,refresh=2000) #    
+# production 
+# s1 <- sampling( MultiYearGauss, data=dat, init=init_4_chains,chains=4,
+#   iter=10000, warmup=2000, cores=4, refresh=2000)
+```
+
+## Marginal Distributions
+
+```{r}
+#|label: prt_sampling_s1
+a = summary(s1)$summary[c(1:4,53,54,5:52),-c(1:3)]
+kable(a, digits=2, row.names=T)
+plot(s1, pars=c('run_year'))
+plot(s1, pars=c('timing_year'))
+
+a = s1@.MISC[["summary"]][["msd"]]  # mean and sd from fit
+a = a[c(1:4,53,54,5:52),] %>% round(2); colnames(a) = c("Mean","Stdev")
+kable(a, col.names = c("Parameter", "Mean","Stdev"))
+# write.csv(a, file=
+
+```
+
+### Compare fitted parameters to original
+
+```{r}
+#| label: compare
+# run_year vs AUC/11. 
+# plot(summary(s1)$summary[5:28,6], fit_G$AUC/11)
+
+# plot pred vs true for run and timing
+a = data.frame( 
+    Gaussian = c(fit_G$AUC/11, fit_G$Mu), 
+    Bayesian = c( summary(s1)$summary[5:28,6], summary(s1)$summary[29:52,6]),
+    param = rep(c('Run','Timing'), each = 24) ) 
+ggplot(a, aes(Gaussian, Bayesian )) + 
+    facet_wrap(param~., scales='free') +
+    geom_point() + geom_abline(slope=1, intercept=0) 
+
+#ggsave('./results/pred_obs_poisson_2024_08_31.pdf', width=5.5, height=5.5) 
+```
+
+### Y_pred and Y_obs by Year
+
+The model fits cumulative spawner entries each day as cumulative Gauss. Cumulative exits is same distribution but lagged in time by *residence* (days). The abundance of spawners each day is cumulative entries minus cumulative exits. The result is effectively a simple Gauss PDD. Plot the observed and predicted distributions by year.
+
+There is a possible confounding of *residence* time with *run* size, a large run with a short residence time will look like a small run with long residence. This is ameliorated by the duration of observed high counts (spawner presence), which invokes the spread of entry. This problem is amplified by modeling observation error in such a way that small counts are more important, which emphasizes *spread* to account for leading and trailing small counts, and down-weights the effect of central, large counts.
+
+```{r}
+#| label: pred_obs_by_year
+Presence = function(day,run, timing, spread, residence){
+    # simplest: Gauss cumulative for spawner entry and exit
+    # run * (cumulative_entries - cumulative_exits)
+    res= run* (pnorm(day, timing, spread)- pnorm(day, timing+residence, spread) )
+    return (res)
+}
+
+# range(day) # 250 338
+s1_summ = summary(s1)$summary                # stats from sampling
+x0 = 250:340                                 # >= range of observations 
+y_o = y_obs [year_first[1] : year_last[1] ]  # observed survey counts
+day_o = day  [year_first[1] : year_last[1] ]    # each survey date
+run_0 =    s1_summ[5,6]                      # run_year 2000, median 
+time_0 =   s1_summ[29,6]                     # timing_year 2000, median
+spread_0 = s1_summ[53,6]                     # spread, same all years, median 
+resid_0 =  s1_summ[54,6]                     # residence, 2000, median
+y_p = Presence(day_o,run_0,time_0,spread_0,resid_0)  # predicted counts
+y_ax_max = 1.1*max( c(y_o, y_p) )                # max for Y axis
+g_in  = run_0*pnorm(x0,time_0,        spread_0)  # entry pattern
+g_out = run_0*pnorm(x0,time_0+resid_0,spread_0)  # exit pattern 
+plotdat1 = data.frame(Day=day_o, Observed=y_o, Predicted = y_p )
+plotdat2 = data.frame(x0,g_in, g_out)
+
+ggplot(plotdat1, aes(Day, Observed)) + theme_SAA() +
+    geom_point() +  
+        geom_line()+ 
+    geom_point(aes(Day, Predicted, shape=1), size=2, colour='blue') +
+        scale_shape_identity() +
+        geom_line(aes(Day, Predicted), colour='blue') + 
+    geom_line(data= plotdat2, aes(x0,g_in )) +
+
+    geom_line(data= plotdat2, aes(x0,g_out)) +
+    coord_cartesian(ylim=c(0,y_ax_max), xlim= c(250,340)) 
+```
+
+### Ditto but for all years
+
+```{r}
+# range(day) # 250 338
+s1_summ = summary(s1)$summary                # stats from sampling
+x0 = 250:340                                 # >= range of observations 
+spread_0 = s1_summ[53,6]                     # spread, same all years, median 
+resid_0 =  s1_summ[54,6]                     # residence, 2000, median
+plotdat1 = data.frame(Year= rep( 2000:2023, times=n_obs_year), 
+                      Day=day, Observed=y_obs, Predicted = 0.0)
+for (j in 1:24) {                # years 2000:2023)
+    k = year_first[j] : year_last[j]
+    y_o = y_obs[k]               # observed survey counts
+    day_o = day[k]               # each survey date
+    run_0 =    s1_summ[j+4,6]    # fitted run , median 
+    time_0 =   s1_summ[j+28,6]   # fitted timing, median
+     plotdat1$Predicted[k] = Presence(day_o,run_0,time_0,spread_0,resid_0) 
+}
+
+ggplot(plotdat1, aes(Day, Observed)) + theme_SAA() +
+    geom_point() +  
+        geom_line() + 
+    geom_point(aes(Day, Predicted, shape=1), size=2, colour='blue') +
+        scale_shape_identity() +
+        geom_line(aes(Day, Predicted), colour='blue') + 
+    facet_wrap(Year ~ .,  scales='free') +
+    labs(x="Day of the Year", y="Live Spawners",
+         title='Spawner Presence, Poisson error', 
+         subtitle='constant spread, residence' )
+# ggsave('./results/MLR_OSO_SOX_poisson_2024_10_25.pdf', width=11, height=5.5) 
+```
+
+### Save Results
+
+```{r}
+#| label: stash
+#| eval: false
+# saveRDS( obs_sampl, './results/obs_sampl.Rdata')
+# saveRDS( obs_true, './results/obs_true.Rdata')
+```
+
+## LOO, WAIC, P_eff
+
+Using the loo package (version \>= 2.0.0). Aki Vehtari and Jonah Gabry. 2024-07-03\
+<https://cran.r-project.org/web/packages/loo/vignettes/loo2-example.html>
+
+Writing Stan programs for use with the loo package. Aki Vehtari and Jonah Gabry. 2024-07-03\
+<https://cran.r-project.org/web/packages/loo/vignettes/loo2-with-rstan.html>
+
+loo: Efficient Leave-One-Out Cross-Validation and WAIC for Bayesian Models. v 2.8.0. 2024-07-03\
+<https://cran.r-project.org/web/packages/loo/index.html>
+
+To cite the loo R package:
+
+> Vehtari A, Gabry J, Magnusson M, Yao Y, Bürkner P, Paananen T, Gelman A (2024). “loo: Efficient leave-one-out cross-validation and WAIC for Bayesian models.” R package version 2.8.0, <https://mc-stan.org/loo/>.
+
+To cite the loo paper:
+
+> Vehtari A, Gelman A, Gabry J (2017). “Practical Bayesian model evaluation using leave-one-out cross-validation and WAIC.” *Statistics and Computing*, **27**, 1413–1432. [doi:10.1007/s11222-016-9696-4](https://doi.org/10.1007/s11222-016-9696-4).
+
+Cross-validation FAQ. Aki Vehtari. Last modified 2024-07-03.\
+<https://mc-stan.org/loo/articles/online-only/faq.html>
+
+```{r}
+#| label: loo
+
+```

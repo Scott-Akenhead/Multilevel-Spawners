@@ -61,22 +61,22 @@ model {
   // local variables
   // group prior PDDs
   
-  timing_mu ~ normal(priors[3,1], priors[3,2]); 
-  timing_sigma ~ exponential(1);                
-  to_vector(timing_z) ~ normal(0, 1);             
+  timing_mu ~ normal(priors[2,1], priors[2,2]); 
+  timing_sigma ~ exponential(priors[3,2]);                
+  timing_z ~ normal(0, 1);             
   
-  spread_arrive_mu  ~ normal( priors[6,1], priors[6,2]);  // 
-  spread_arrive_sigma ~ exponential(priors[9,2]);
-  to_vector(spread_arrive_z) ~ normal(0, 1);
+  spread_arrive_mu  ~ normal(priors[4,1], priors[4,2]);  // 
+  spread_arrive_sigma ~ exponential(priors[5,2]);
+  spread_arrive_z ~ normal(0, 1);
   
-  spread_death_mu   ~ normal( priors[6,1], priors[6,2]);  // 
-  spread_death_sigma ~ exponential(priors[9,2]);
-  to_vector(spread_death_z) ~ normal(0, 1);
+  spread_death_mu   ~ normal(priors[4,1], priors[4,2]);  // 
+  spread_death_sigma ~ exponential(priors[5,2]);
+  spread_death_z ~ normal(0, 1);
   
   // simple PDD
   log_run ~ normal(priors[1,1], priors[1,2]);  // mean  run log
-  residence_raw  ~ normal( priors[7,1], priors[7,2]);  // same all years
-  log(phi_live)   ~ normal( priors[8,1], priors[8,2]);
+  residence_raw  ~ normal(priors[6,1], priors[6,2]);  // same all years
+  log(phi_live)   ~ normal(priors[7,1], priors[7,2]);
   
   
   //likelihood

@@ -6,6 +6,7 @@ library(patchwork)
 library(ggrepel)
 library(janitor)
 library(scales)
+library(geomtextpath)
 
 theme_set(theme_bw())
 
@@ -101,67 +102,112 @@ spread_draws(fit, log_run[year]) %>%
   scale_color_manual(values = c("red", 1), "")+
   xlab("")
 ggsave("./figures/spawner_abund.pdf", height = 4, width = 7)
-  
+
 spread_draws(fit, timing[year]) %>% 
-  mutate(year = year + min(spawners$year)-1) %>% 
-  ggplot(aes(x = year, y = timing))+
+  mutate(year = year + min(spawners$year)-1) %>%
+  ggplot(aes(x = year, y = timing + 240))+
   stat_pointinterval()+
+  scale_y_continuous(breaks = seq(280, 292, by = 3))+
+  ylab("Mean arrival day")+
+  xlab("")+
   
   spread_draws(fit, spread_arrive[year]) %>% 
   mutate(year = year + min(spawners$year)-1) %>% 
   ggplot(aes(x = year, y = spread_arrive))+
   stat_pointinterval()+
+  ylab("Arrival timing sd (days)")+
+  xlab("")+
   
   spread_draws(fit, spread_death[year]) %>% 
   mutate(year = year + min(spawners$year)-1) %>% 
   ggplot(aes(x = year, y = spread_death))+
   stat_pointinterval()+
-  plot_layout(ncol = 1)
+  plot_layout(ncol = 1)+
+  ylab("Death timing sd (days)")+
+  xlab("")+
+  
+  plot_annotation(tag_levels = "A")
+ggsave("./figures/timing_spread.pdf", height = 8, width = 6)
 
 #plot estimated spawner curves####
 spawn_curves.df <- data.frame()
 for(j in 1:ncol(post$log_run)){
-  for(i in 1:sp_dat$n_locations){
-    if(sp_dat$is_valid[j,i] == 1){
-      live <- sapply(1:max(sp_dat$day), FUN = function(x) {
-        entered <- pnorm(x, post$timing[,j,i], post$spread_arrive[,j,i])
-        exited <- pnorm(x, post$timing[,j,i] + post$residence[,i], post$spread_death[,j,i])
-        
-        exp(post$log_run[,j] + log(entered - (entered * exited))) * post$run_prop[,j,i]
-      })
-      
-      spawn_curves.df <- bind_rows(spawn_curves.df, data.frame(year = j + min(spawners$year)-1, 
-                                                               day = 1:max(sp_dat$day)+240,
-                                                               location = location_levels$location[i],
-                                                               fish = apply(live, 2, median),
-                                                               l89 = apply(live, 2, quantile, probs = 0.065),
-                                                               u89 = apply(live, 2, quantile, probs = 0.945)))
-    }
-  }
+  live <- sapply(1:max(sp_dat$day), FUN = function(x) {
+    entered <- pnorm(x, post$timing[,j], post$spread_arrive[,j])
+    exited <- pnorm(x, post$timing[,j] + post$residence, post$spread_death[,j])
+    
+    exp(post$log_run[,j] + log(entered - (entered * exited)))
+  })
+  
+  spawn_curves.df <- bind_rows(spawn_curves.df, data.frame(year = j + min(spawners$year)-1, 
+                                                           day = 1:max(sp_dat$day)+240,
+                                                           fish = apply(live, 2, median),
+                                                           l89 = apply(live, 2, quantile, probs = 0.065),
+                                                           u89 = apply(live, 2, quantile, probs = 0.945)))
 }
 
-ggplot(spawn_curves.df, aes(x = day, y = fish, color = location, fill = location))+
-  geom_line()+
-  geom_ribbon(aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
-  facet_wrap(~year, scales = "free_y")+
-  geom_point(data = index_sk, aes(x = yday, y = live), size = 0.8)+
-  scale_color_brewer(palette = "Set1")+
-  scale_fill_brewer(palette = "Set1")
 
 ggplot(spawn_curves.df, aes(x = day, y = fish))+
   geom_line()+
   geom_ribbon(aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
-  facet_grid(location~year, scales = "free_y")+
-  geom_point(data = index_sk, aes(x = yday, y = live), size = 0.8)+
-  scale_x_continuous(breaks = seq(240, 325, by = 35))
-
-ggplot(spawn_curves.df, aes(x = day, y = fish, color = location, fill = location))+
-  geom_line()+
-  geom_ribbon(aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
   facet_wrap(~year)+
   geom_point(data = index_sk, aes(x = yday, y = live), size = 0.8)+
-  scale_y_log10()+
-  coord_cartesian(ylim = c(1,1e5))+
   scale_color_brewer(palette = "Set1")+
-  scale_fill_brewer(palette = "Set1")
+  scale_fill_brewer(palette = "Set1")+
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawner count (thousands)", expand = expansion(mult = c(0, 0.02)))+
+  theme(strip.background = element_rect(color="NA", fill="NA", size=1.5, linetype="solid"))+
+  scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b"), 
+                     breaks = as.numeric(as.Date(c("2024-09-01", "2024-10-01", "2024-11-01")) - as.Date("2023-12-31")), name = "")
+ggsave("./figures/spawner_curves.pdf",width = 8, height = 8)
+
+j <- 25 # used 2024 as example
+arrived <- sapply(15:max(sp_dat$day), FUN = function(x) {
+  pnorm(x, post$timing[,j], post$spread_arrive[,j]) * exp(post$log_run[,j])
+}) %>% 
+  as_tibble() %>%
+  mutate(draw = row_number()) %>%
+  pivot_longer(-draw, names_to = "day", values_to = "spawners") %>%
+  mutate(day = as.integer(gsub("V", "", day)) + 14) %>% 
+  mutate(type = "arrived")
+
+dead <- sapply(15:max(sp_dat$day), FUN = function(x) {
+  pnorm(x, post$timing[,j] + post$residence, post$spread_death[,j]) * exp(post$log_run[,j])
+}) %>% 
+  as_tibble() %>%
+  mutate(draw = row_number()) %>%
+  pivot_longer(-draw, names_to = "day", values_to = "spawners") %>%
+  mutate(day = as.integer(gsub("V", "", day))+14) %>% 
+  mutate(type = "dead")
+
+counts <- sapply(15:max(sp_dat$day), FUN = function(x) {
+  entered <- pnorm(x, post$timing[,j], post$spread_arrive[,j])
+  exited <- pnorm(x, post$timing[,j] + post$residence, post$spread_death[,j])
+  
+  exp(post$log_run[,j] + log(entered - (entered * exited)))
+}) %>% 
+  as_tibble() %>%
+  mutate(draw = row_number()) %>%
+  pivot_longer(-draw, names_to = "day", values_to = "spawners") %>%
+  mutate(day = as.integer(gsub("V", "", day)) + 14) %>% 
+  mutate(type = "present")
+
+bind_rows(arrived, dead, counts) %>% 
+  group_by(type, day) %>% 
+  summarise(l89 = quantile(spawners, probs = 0.065), 
+            u89 = quantile(spawners, probs = 0.945),
+            spawners = median(spawners)) %>% 
+  ggplot(aes(x = day + 240, y = spawners, group = type))+
+  geom_ribbon(aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
+  geom_textline(size = 5, linewidth = 1, aes(label = type), hjust = 0.65) +
+  #geom_line(size = 1.5, aes(linetype = type))+
+  scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b ") %>% 
+                       paste0(as.integer(format(as.Date(.x, origin = "2023-12-31"), "%d"))),
+                     breaks = as.numeric(as.Date(c("2024-09-15", "2024-10-01", "2024-10-15", "2024-11-01", "2024-11-15")) - as.Date("2023-12-31")), 
+                     name = "", expand = c(0, 0))+
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.02)))+
+  geom_point(data = index_sk %>% filter(year == 2024), aes(x = yday, y = live, group = NA))
+ggsave("./figures/method_example.pdf", width = 6, height = 4)  
+
+
+
 

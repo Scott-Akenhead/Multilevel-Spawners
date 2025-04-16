@@ -155,7 +155,7 @@ ggplot(spawn_curves.df, aes(x = day, y = fish))+
   scale_color_brewer(palette = "Set1")+
   scale_fill_brewer(palette = "Set1")+
   scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawner count (thousands)", expand = expansion(mult = c(0, 0.02)))+
-  theme(strip.background = element_rect(color="NA", fill="NA", size=1.5, linetype="solid"))+
+  theme(strip.background = element_rect(color="NA", fill="NA"))+
   scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b"), 
                      breaks = as.numeric(as.Date(c("2024-09-01", "2024-10-01", "2024-11-01")) - as.Date("2023-12-31")), name = "")
 ggsave("./figures/spawner_curves.pdf",width = 8, height = 8)
@@ -191,22 +191,60 @@ counts <- sapply(15:max(sp_dat$day), FUN = function(x) {
   mutate(day = as.integer(gsub("V", "", day)) + 14) %>% 
   mutate(type = "present")
 
-bind_rows(arrived, dead, counts) %>% 
+example_data <- bind_rows(arrived, dead, counts) %>% 
   group_by(type, day) %>% 
   summarise(l89 = quantile(spawners, probs = 0.065), 
             u89 = quantile(spawners, probs = 0.945),
-            spawners = median(spawners)) %>% 
-  ggplot(aes(x = day + 240, y = spawners, group = type))+
+            spawners = median(spawners))
+
+mean_arrival_day <- median(post$timing[,j])
+median_residence <- median(post$residence)
+y_value <- median(pnorm(mean_arrival_day, post$timing[,j], post$spread_arrive[,j]) * exp(post$log_run[,j]))
+x_start <- mean_arrival_day + 240
+x_end <- mean_arrival_day + median_residence + 240
+
+residence_df <- data.frame(
+  x = x_start,
+  xend = x_end,
+  y = y_value,
+  yend = y_value,
+  label = "residence"
+)
+
+ggplot(example_data, aes(x = day + 240, y = spawners, group = type))+
+  #geom_ribbon(data = example_data %>% filter(type == "present"), aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
+  geom_textline(size = 5, linewidth = 1, aes(label = type), hjust = 0.65) +
+  scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b ") %>% 
+                       paste0(as.integer(format(as.Date(.x, origin = "2023-12-31"), "%d"))),
+                     breaks = as.numeric(as.Date(c("2024-09-15", "2024-10-01", "2024-10-15", "2024-11-01", "2024-11-15")) - as.Date("2023-12-31")), 
+                     name = "", expand = c(0, 0))+
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.02)))+
+  #geom_point(data = index_sk %>% filter(year == 2024), aes(x = yday, y = live, group = NA))+
+  geom_textsegment(data = residence_df, aes(x = x_start, xend = x_end, y = y_value, yend = y_value, label = "residence"), linewidth = 0.5, inherit.aes = FALSE, size = 2.8)
+ggsave("./figures/method_example_no_CI.pdf", width = 6, height = 4)  
+
+ggplot(example_data, aes(x = day + 240, y = spawners, group = type))+
+  geom_ribbon(data = example_data %>% filter(type == "present"), aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
+  geom_textline(size = 5, linewidth = 1, aes(label = type), hjust = 0.65) +
+  scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b ") %>% 
+                       paste0(as.integer(format(as.Date(.x, origin = "2023-12-31"), "%d"))),
+                     breaks = as.numeric(as.Date(c("2024-09-15", "2024-10-01", "2024-10-15", "2024-11-01", "2024-11-15")) - as.Date("2023-12-31")), 
+                     name = "", expand = c(0, 0))+
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.02)))+
+  geom_point(data = index_sk %>% filter(year == 2024), aes(x = yday, y = live, group = NA))+
+  geom_textsegment(data = residence_df, aes(x = x_start, xend = x_end, y = y_value, yend = y_value, label = "residence"), linewidth = 0.5, inherit.aes = FALSE, size = 2.8)
+ggsave("./figures/method_example_obs_CI.pdf", width = 6, height = 4)  
+
+ggplot(example_data, aes(x = day + 240, y = spawners, group = type))+
   geom_ribbon(aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
   geom_textline(size = 5, linewidth = 1, aes(label = type), hjust = 0.65) +
-  #geom_line(size = 1.5, aes(linetype = type))+
   scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b ") %>% 
                        paste0(as.integer(format(as.Date(.x, origin = "2023-12-31"), "%d"))),
                      breaks = as.numeric(as.Date(c("2024-09-15", "2024-10-01", "2024-10-15", "2024-11-01", "2024-11-15")) - as.Date("2023-12-31")), 
                      name = "", expand = c(0, 0))+
   scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.02)))+
   geom_point(data = index_sk %>% filter(year == 2024), aes(x = yday, y = live, group = NA))
-ggsave("./figures/method_example.pdf", width = 6, height = 4)  
+ggsave("./figures/method_example.pdf", width = 6, height = 4) 
 
 
 

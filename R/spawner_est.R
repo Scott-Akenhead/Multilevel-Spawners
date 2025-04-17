@@ -50,7 +50,7 @@ index_sk %>%
 
 
 #set up data for model####
-priors <- data.frame(prior = c("log_runs_mu", "timings_mu", "timings_sigma", "spread","spread_sigma","residence_mu", "count_dispersion"),
+priors <- data.frame(prior = c("log_runs_mu", "arrival_mu", "arrival_sigma", "spread","spread_sigma","residence", "count_dispersion"),
                      v1 = c(10,280-240, 0,log(8-1), 0,log(11-1), 1), 
                      v2 = c(1,5,2,0.2, 10, 0.3, 0.2))
 
@@ -81,7 +81,7 @@ worst_Rhat %>%
   geom_vline(xintercept = 400, lty = 2)
 
 traceplot(fit, pars = rownames(worst_Rhat)[1:20])
-traceplot(fit, pars = c("timing_sigma", "timing_mu", "spread_arrive_mu", "spread_arrive_sigma", "spread_death_mu", "spread_death_sigma", "residence"))
+traceplot(fit, pars = c("arrival_sigma", "arrival_mu", "arrival_spread_mu", "arrival_spread_sigma", "death_spread_mu", "death_spread_sigma", "residence"))
 
 #posterior plots####
 post <- extract(fit)
@@ -107,38 +107,38 @@ spread_draws(fit, log_run[year]) %>%
   xlab("")
 ggsave("./figures/spawner_abund.pdf", height = 4, width = 7)
 
-spread_draws(fit, timing[year]) %>% 
+spread_draws(fit, arrival[year]) %>% 
   mutate(year = year + min(spawners$year)-1) %>%
-  ggplot(aes(x = year, y = timing + 240))+
+  ggplot(aes(x = year, y = arrival + 240))+
   stat_pointinterval()+
   scale_y_continuous(breaks = seq(280, 292, by = 3))+
   ylab("Mean arrival day")+
   xlab("")+
   
-  spread_draws(fit, spread_arrive[year]) %>% 
+  spread_draws(fit, arrival_spread[year]) %>% 
   mutate(year = year + min(spawners$year)-1) %>% 
-  ggplot(aes(x = year, y = spread_arrive))+
+  ggplot(aes(x = year, y = arrival_spread))+
   stat_pointinterval()+
   ylab("Arrival timing sd (days)")+
   xlab("")+
   
-  spread_draws(fit, spread_death[year]) %>% 
+  spread_draws(fit, death_spread[year]) %>% 
   mutate(year = year + min(spawners$year)-1) %>% 
-  ggplot(aes(x = year, y = spread_death))+
+  ggplot(aes(x = year, y = death_spread))+
   stat_pointinterval()+
   plot_layout(ncol = 1)+
   ylab("Death timing sd (days)")+
   xlab("")+
   
   plot_annotation(tag_levels = "A")
-ggsave("./figures/timing_spread.pdf", height = 8, width = 6)
+ggsave("./figures/timing.pdf", height = 8, width = 6)
 
 #plot estimated spawner curves####
 spawn_curves.df <- data.frame()
 for(j in 1:ncol(post$log_run)){
   live <- sapply(1:max(sp_dat$day), FUN = function(x) {
-    entered <- pnorm(x, post$timing[,j], post$spread_arrive[,j])
-    exited <- pnorm(x, post$timing[,j] + post$residence, post$spread_death[,j])
+    entered <- pnorm(x, post$arrival[,j], post$arrival_spread[,j])
+    exited <- pnorm(x, post$arrival[,j] + post$residence, post$death_spread[,j])
     
     exp(post$log_run[,j] + log(entered - (entered * exited)))
   })
@@ -166,7 +166,7 @@ ggsave("./figures/spawner_curves.pdf",width = 8, height = 8)
 
 j <- 25 # used 2024 as example
 arrived <- sapply(15:max(sp_dat$day), FUN = function(x) {
-  pnorm(x, post$timing[,j], post$spread_arrive[,j]) * exp(post$log_run[,j])
+  pnorm(x, post$arrival[,j], post$arrival_spread[,j]) * exp(post$log_run[,j])
 }) %>% 
   as_tibble() %>%
   mutate(draw = row_number()) %>%
@@ -175,7 +175,7 @@ arrived <- sapply(15:max(sp_dat$day), FUN = function(x) {
   mutate(type = "arrived")
 
 dead <- sapply(15:max(sp_dat$day), FUN = function(x) {
-  pnorm(x, post$timing[,j] + post$residence, post$spread_death[,j]) * exp(post$log_run[,j])
+  pnorm(x, post$arrival[,j] + post$residence, post$death_spread[,j]) * exp(post$log_run[,j])
 }) %>% 
   as_tibble() %>%
   mutate(draw = row_number()) %>%
@@ -184,8 +184,8 @@ dead <- sapply(15:max(sp_dat$day), FUN = function(x) {
   mutate(type = "dead")
 
 counts <- sapply(15:max(sp_dat$day), FUN = function(x) {
-  entered <- pnorm(x, post$timing[,j], post$spread_arrive[,j])
-  exited <- pnorm(x, post$timing[,j] + post$residence, post$spread_death[,j])
+  entered <- pnorm(x, post$arrival[,j], post$arrival_spread[,j])
+  exited <- pnorm(x, post$arrival[,j] + post$residence, post$death_spread[,j])
   
   exp(post$log_run[,j] + log(entered - (entered * exited)))
 }) %>% 
@@ -201,9 +201,9 @@ example_data <- bind_rows(arrived, dead, counts) %>%
             u89 = quantile(spawners, probs = 0.945),
             spawners = median(spawners))
 
-mean_arrival_day <- median(post$timing[,j])
+mean_arrival_day <- median(post$arrival[,j])
 median_residence <- median(post$residence)
-y_value <- median(pnorm(mean_arrival_day, post$timing[,j], post$spread_arrive[,j]) * exp(post$log_run[,j]))
+y_value <- median(pnorm(mean_arrival_day, post$arrival[,j], post$arrival_spread[,j]) * exp(post$log_run[,j]))
 x_start <- mean_arrival_day + 240
 x_end <- mean_arrival_day + median_residence + 240
 

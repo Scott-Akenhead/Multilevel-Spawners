@@ -52,7 +52,7 @@ index_sk %>%
 #set up data for model####
 priors <- data.frame(prior = c("log_runs_mu", "timings_mu", "timings_sigma", "spread","spread_sigma","residence_mu", "count_dispersion"),
                      v1 = c(10,280-240, 0,log(8-1), 0,log(11-1), 1), 
-                     v2 = c(1,5,1,0.2, 10, 0.3, 0.2))
+                     v2 = c(1,5,2,0.2, 10, 0.3, 0.2))
 
 
 sp_dat = list(n_priors = nrow(priors), 
@@ -64,9 +64,8 @@ sp_dat = list(n_priors = nrow(priors),
               live_counts = index_sk$live)
 
 #stan model####
-
 m <- stan_model(file = "./stan/spawners.stan")
-fit <- sampling(m, data = sp_dat, chains = 4, cores = 4)
+fit <- sampling(m, data = sp_dat, chains = 4, cores = 4, seed = 7)
 
 #model checks####
 worst_Rhat <- summary(fit)$summary %>% 
@@ -159,7 +158,7 @@ ggplot(spawn_curves.df, aes(x = day, y = fish))+
   geom_point(data = index_sk, aes(x = yday, y = live), size = 0.8)+
   scale_color_brewer(palette = "Set1")+
   scale_fill_brewer(palette = "Set1")+
-  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawner count (thousands)", expand = expansion(mult = c(0, 0.02)))+
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners present (thousands)", expand = expansion(mult = c(0, 0.02)))+
   theme(strip.background = element_rect(color="NA", fill="NA"))+
   scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b"), 
                      breaks = as.numeric(as.Date(c("2024-09-01", "2024-10-01", "2024-11-01")) - as.Date("2023-12-31")), name = "")

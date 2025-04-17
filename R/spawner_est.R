@@ -212,40 +212,61 @@ residence_df <- data.frame(
 )
 
 ggplot(example_data, aes(x = day + 240, y = spawners, group = type))+
-  #geom_ribbon(data = example_data %>% filter(type == "present"), aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
-  geom_textline(size = 5, linewidth = 1, aes(label = type), hjust = 0.65) +
+  geom_textline(size = 4, linewidth = 1, aes(label = type), hjust = 0.65, family = "sans") +
   scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b ") %>% 
                        paste0(as.integer(format(as.Date(.x, origin = "2023-12-31"), "%d"))),
                      breaks = as.numeric(as.Date(c("2024-09-15", "2024-10-01", "2024-10-15", "2024-11-01", "2024-11-15")) - as.Date("2023-12-31")), 
                      name = "", expand = c(0, 0))+
-  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.02)))+
-  #geom_point(data = index_sk %>% filter(year == 2024), aes(x = yday, y = live, group = NA))+
-  geom_textsegment(data = residence_df, aes(x = x_start, xend = x_end, y = y_value, yend = y_value, label = "residence"), linewidth = 0.5, inherit.aes = FALSE, size = 2.8)
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.075)))+
+  geom_textsegment(data = residence_df, aes(x = x_start, xend = x_end, y = y_value, yend = y_value, label = "residence"), linewidth = 0.5, inherit.aes = FALSE, size = 2.8, family = "sans")+
+  annotate("text",
+           x = Inf,
+           y = max(example_data$spawners),  
+           label = "total abundance",
+           hjust = 1.03,
+           vjust = -0.3,
+           size = 4,
+           family = "sans")+
+  theme(panel.grid = element_blank())
 ggsave("./figures/method_example_no_CI.pdf", width = 6, height = 4)  
 
 ggplot(example_data, aes(x = day + 240, y = spawners, group = type))+
   geom_ribbon(data = example_data %>% filter(type == "present"), aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
-  geom_textline(size = 5, linewidth = 1, aes(label = type), hjust = 0.65) +
+  geom_textline(size = 4, linewidth = 1, aes(label = type), hjust = 0.65, family = "sans") +
   scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b ") %>% 
                        paste0(as.integer(format(as.Date(.x, origin = "2023-12-31"), "%d"))),
                      breaks = as.numeric(as.Date(c("2024-09-15", "2024-10-01", "2024-10-15", "2024-11-01", "2024-11-15")) - as.Date("2023-12-31")), 
                      name = "", expand = c(0, 0))+
-  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.02)))+
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.075)))+
   geom_point(data = index_sk %>% filter(year == 2024), aes(x = yday, y = live, group = NA))+
-  geom_textsegment(data = residence_df, aes(x = x_start, xend = x_end, y = y_value, yend = y_value, label = "residence"), linewidth = 0.5, inherit.aes = FALSE, size = 2.8)
+  geom_textsegment(data = residence_df, aes(x = x_start, xend = x_end, y = y_value, yend = y_value, label = "residence"), linewidth = 0.5, inherit.aes = FALSE, size = 2.8, family = "sans")+
+  annotate("text",
+           x = Inf,
+           y = max(example_data$spawners),  
+           label = "total abundance",
+           hjust = 1.03,
+           vjust = -0.3,
+           size = 4,
+           family = "sans")+
+  theme(panel.grid = element_blank())
 ggsave("./figures/method_example_obs_CI.pdf", width = 6, height = 4)  
 
 ggplot(example_data, aes(x = day + 240, y = spawners, group = type))+
   geom_ribbon(aes(ymin = l89, ymax = u89), color = NA, alpha = 0.2)+
-  geom_textline(size = 5, linewidth = 1, aes(label = type), hjust = 0.65) +
+  geom_textline(size = 4, linewidth = 1, aes(label = type), hjust = 0.65, family = "sans") +
   scale_x_continuous(labels = ~ format(as.Date(.x, origin = "2023-12-31"), "%b ") %>% 
                        paste0(as.integer(format(as.Date(.x, origin = "2023-12-31"), "%d"))),
                      breaks = as.numeric(as.Date(c("2024-09-15", "2024-10-01", "2024-10-15", "2024-11-01", "2024-11-15")) - as.Date("2023-12-31")), 
                      name = "", expand = c(0, 0))+
-  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.02)))+
-  geom_point(data = index_sk %>% filter(year == 2024), aes(x = yday, y = live, group = NA))
-ggsave("./figures/method_example.pdf", width = 6, height = 4) 
-
-
-
-
+  scale_y_continuous(labels = label_number(scale = 1e-3, suffix = "k"), name = "Spawners (thousands)", expand = expansion(mult = c(0, 0.05)))+
+  geom_point(data = index_sk %>% filter(year == 2024), aes(x = yday, y = live, group = NA))+
+  annotate("text",
+           x = Inf,
+           y = max(example_data$spawners),  
+           label = "total abundance",
+           hjust = 1.03,
+           vjust = -0.3,
+           size = 4,
+           family = "sans")+
+  theme(panel.grid = element_blank())
+ggsave("./figures/method_example.pdf", width = 6, height = 4)

@@ -82,16 +82,21 @@ worst_Rhat %>%
   geom_vline(xintercept = 400, lty = 2)
 
 traceplot(fit, pars = rownames(worst_Rhat)[1:20])
-traceplot(fit, pars = c("timing_sigma", "timing_mu", "spread_arrive_mu", "spread_arrive_sigma", "spread_death_mu", "spread_death_sigma"))
+traceplot(fit, pars = c("timing_sigma", "timing_mu", "spread_arrive_mu", "spread_arrive_sigma", "spread_death_mu", "spread_death_sigma", "residence"))
 
 #posterior plots####
 post <- extract(fit)
 
 gather_draws(fit, residence) %>% 
-  ggplot(aes(x = .variable, y = .value))+
-  geom_hline(yintercept = 11, lty = 2)+
-  stat_pointinterval()
-
+  ggplot(aes(x = .value))+
+  stat_dist_halfeye()+
+  geom_textvline(data = data.frame(x = 11, label = "previously assumed residence"),lty = 2, aes(xintercept = x, label = label), hjust = 0.9, size = 3)+
+  xlab("Mean residence time")+
+  ylab("Posterior density")+
+  scale_x_continuous(breaks = seq(5, 15, by = 2))+
+  theme(panel.grid = element_blank())+
+  scale_y_continuous(limits = c(0, 1), expand = expansion(c(0.02, 0)))
+ggsave("./figures/residence.pdf", height = 4, width = 6)
 
 spread_draws(fit, log_run[year]) %>% 
   mutate(year = year + min(spawners$year)-1) %>% 
